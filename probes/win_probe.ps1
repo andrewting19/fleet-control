@@ -6,6 +6,7 @@ $cores = [int]$cs.NumberOfLogicalProcessors
 # Formatted perf counters are rates over the last WMI sample, so read once, wait, read again.
 $null = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process
 $null = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor
+$null = Get-CimInstance Win32_PerfFormattedData_PerfDisk_LogicalDisk
 Start-Sleep -Milliseconds 1000
 $cpu = [double](Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
 $queue = [double](Get-CimInstance Win32_PerfFormattedData_PerfOS_System).ProcessorQueueLength
@@ -13,6 +14,14 @@ $mem = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
 $pf = @(Get-CimInstance Win32_PageFileUsage)
 $swapTotal = [double](($pf | Measure-Object AllocatedBaseSize -Sum).Sum) * 1MB
 $swapUsed = [double](($pf | Measure-Object CurrentUsage -Sum).Sum) * 1MB
+# "Pages Input/sec" also counts reads of mapped files (databases, programs), so it is not a swap rate.
+# Real paging must also show as disk traffic on the drive that holds the page file: take the smaller of the two.
+$pfDrives = @($pf | ForEach-Object { $_.Name.Substring(0, 2).ToUpper() } | Select-Object -Unique)
+$ld = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_LogicalDisk | Where-Object { $pfDrives -contains $_.Name.ToUpper() })
+$pfRead = [double](($ld | Measure-Object DiskReadBytesPersec -Sum).Sum)
+$pfWrite = [double](($ld | Measure-Object DiskWriteBytesPersec -Sum).Sum)
+$swapIn = [Math]::Min([double]$mem.PagesInputPersec * 4096, $pfRead)
+$swapOut = [Math]::Min([double]$mem.PagesOutputPersec * 4096, $pfWrite)
 $disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Where-Object { $_.Size -gt 0 } | ForEach-Object { @{ mount = $_.DeviceID; total = [double]$_.Size; used = [double]($_.Size - $_.FreeSpace) } })
 $gpus = @()
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
@@ -40,7 +49,7 @@ $out = @{
   ok = $true; hostname = $env:COMPUTERNAME; os = 'Windows'; cores = $cores; load = @($load, $load, $load); cpu_util = $cpu
   mem_total = [double]$cs.TotalPhysicalMemory; mem_avail = [double]$mem.AvailableBytes
   swap_total = $swapTotal; swap_used = $swapUsed
-  swap_rate_1s = @{ in = [double]$mem.PagesInputPersec; out = [double]$mem.PagesOutputPersec }
+  page_size = 1; swap_rate_1s = @{ in = $swapIn; out = $swapOut }
   disks = $disks; gpus = $gpus; procs = $procs; mem_top = $mtop
   uptime = [int]($now - $os.LastBootUpTime).TotalSeconds; probe_ms = [int]($now - $t0).TotalMilliseconds
 }

@@ -100,7 +100,8 @@ def thrash_level(os_name, free_pct, swap_in_mbps, psi=None, mem_level=None):
     """Thrashing means the machine keeps moving pages between RAM and disk, so work stalls.
     A full swap file alone is not thrashing. Returns "ok", "warn" or "crit"."""
     if os_name == "windows":
-        # "Pages Input/sec" also counts normal file reads, so count it only when free memory is low too.
+        # The probe sends min(hard-fault bytes, reads on the page-file drive). That still can include mapped-file
+        # reads on the same drive, so count it only when free memory is low too.
         if free_pct <= 5 and swap_in_mbps >= 20:
             return "crit"
         if free_pct <= 10 and swap_in_mbps >= 5:
