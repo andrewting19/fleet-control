@@ -4,7 +4,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const UI = Object.assign({ win: "24h", prov: "all", metric: "cost" }, JSON.parse(localStorage.getItem("fc-ui") || "{}"));
 const openHosts = new Set(JSON.parse(localStorage.getItem("fc-open") || "[]"));
 let STATE = null, RAW = null, STATIC = false, showNotes = false;
-if (new URLSearchParams(location.search).has("private")) UI.private = true;
+UI.private = new URLSearchParams(location.search).has("private"); // ?private=1 hides names; it is not saved
 
 const PALETTE = ["#6aa8ff", "#4dd4c6", "#b48cff", "#e5a54b", "#f07fa8", "#a3d65c", "#d9895c", "#818cf8", "#4cc38a", "#f2c94c", "#5ec8f2", "#e57fd8"];
 let RANK = {};
@@ -475,12 +475,6 @@ function privatize(raw) {
   };
   return walk(raw);
 }
-$("#priv").onclick = () => {
-  UI.private = !UI.private; localStorage.setItem("fc-ui", JSON.stringify(UI));
-  $("#priv").classList.toggle("on", UI.private); $("#priv").textContent = UI.private ? "Show names" : "Hide names";
-  if (RAW) { STATE = UI.private ? privatize(RAW) : RAW; render(); }
-};
-$("#priv").classList.toggle("on", !!UI.private); $("#priv").textContent = UI.private ? "Show names" : "Hide names";
 document.querySelectorAll(".seg").forEach((seg) => seg.addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
   UI[seg.dataset.k] = b.dataset.v; localStorage.setItem("fc-ui", JSON.stringify(UI)); renderUsage(STATE);

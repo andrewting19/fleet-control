@@ -107,4 +107,4 @@ header .brand{width:18px;height:18px;color:var(--barok)}
 .pdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
 #demo{margin-left:0}
 @media(max-width:640px){header{padding:10px 14px;flex-wrap:wrap}main{padding:14px}.ms{grid-template-columns:repeat(2,1fr);gap:12px}.controls{margin-left:0;flex-wrap:wrap}.head{gap:8px}}
-header button+button{margin-left:-4px}#priv.on{border-color:var(--barok);color:var(--barok)}
+header button+button{margin-left:-4px}

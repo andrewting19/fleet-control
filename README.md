@@ -25,8 +25,8 @@ python3 fleet.py serve               # this machine and your Codex login, no con
 
 Open http://localhost:10400.
 
-To share a screenshot, click **Hide names** (or open `/?private=1`). The page then shows made-up names for
-machines, accounts, projects, folders and threads. The numbers stay real. The setting is kept in the browser.
+To share a screenshot, open `/?private=1`. The page then shows made-up names for
+machines, accounts, projects, folders and threads. The numbers stay real.
 
 `python3 fleet.py export-demo DIR` writes a static copy with made-up data, for GitHub Pages or any file host.
 
