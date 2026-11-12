@@ -178,10 +178,11 @@ def mac():
 
     util = 0.0
     s0 = swapins(); w0 = time.time()
-    top = sh("top -l 2 -n 0 -s 1 | grep 'CPU usage' | tail -1", 10)
+    # iostat samples CPU over 1 s and costs almost nothing ("top -l 2" costs about 1 s of CPU, which a loaded Mac lacks).
+    io = sh("iostat -n 0 -c 2 -w 1", 10).strip().splitlines()
     s1 = swapins(); dt = max(0.5, time.time() - w0)
     try:
-        util = 100 - float(top.split("idle")[0].split(",")[-1].strip().rstrip("%"))
+        util = 100 - float(io[-1].split()[2])
     except Exception:
         pass
     total = int(sh("sysctl -n hw.memsize").strip() or 0)

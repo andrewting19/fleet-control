@@ -3,6 +3,7 @@ import base64
 import datetime
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -25,11 +26,26 @@ def ssh_opts():
 
 
 def run(cmd, timeout=60, stdin=None, env=None):
-    p = subprocess.run(cmd, input=stdin, capture_output=True, timeout=timeout, env=env)
+    """Run a command with a hard time limit. On timeout the whole process group is killed, and the call returns
+    even if a child (for example an SSH control master) still holds the output pipes."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
+    try:
+        out, err = p.communicate(stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            p.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+        raise RuntimeError("timed out after %d s" % timeout)
     if p.returncode != 0:
-        err = (p.stderr or b"").decode("utf-8", "replace").strip()
+        err = (err or b"").decode("utf-8", "replace").strip()
         raise RuntimeError(err[-300:] or "exit %d" % p.returncode)
-    return p.stdout
+    return out
 
 
 def last_json(out):

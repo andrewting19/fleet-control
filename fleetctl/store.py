@@ -33,7 +33,7 @@ class Store:
             self.acct_hist = []
 
     def save_history(self):
-        tmp = self._path() + ".tmp"
+        tmp = "%s.%d.%d.tmp" % (self._path(), os.getpid(), threading.get_ident())
         with open(tmp, "w") as f:
             json.dump(self.acct_hist, f)
         os.replace(tmp, self._path())

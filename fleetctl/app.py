@@ -116,7 +116,7 @@ class App:
                 log("build failed", traceback.format_exc())
 
     # ------------------------------------------------------------ schedule
-    def every(self, sec, fn):
+    def every(self, sec, fn, name=None):
         def loop():
             while True:
                 t = time.time()
@@ -125,7 +125,7 @@ class App:
                 except Exception:
                     log(fn.__name__, "failed", traceback.format_exc())
                 time.sleep(max(1, sec - (time.time() - t)))
-        threading.Thread(target=loop, daemon=True, name=fn.__name__).start()
+        threading.Thread(target=loop, daemon=True, name=name or fn.__name__).start()
 
     def start(self):
         iv = self.cfg["intervals"]
@@ -136,9 +136,15 @@ class App:
             return
         if self.cfg["tailscale"]["enabled"]:
             self.every(iv["tailscale"], self.tailscale)
-        self.every(iv["probe"], self.probe_all)
+        # One loop per machine and job: a slow or dead machine never delays the others.
+        for h in self.cfg["hosts"]:
+            if h.get("local") or h.get("ssh"):
+                self.every(iv["probe"], lambda h=h: hosts.probe(self.store, h), "probe:" + h["name"])
+            if h.get("scan"):
+                self.every(iv["scan"], lambda h=h: usage.scan(self.store, h), "scan:" + h["name"])
         self.every(iv["accounts"], self.accounts)
-        self.every(iv["scan"], self.scan_all)
+        # The page data is rebuilt on its own timer, so it stays current while collectors wait on busy machines.
+        self.every(5, self.build)
 
     def refresh(self):
         if not self.demo:

@@ -1,4 +1,5 @@
 """Machines: run the probe on each host and turn the raw numbers into a status with reasons."""
+import os
 import time
 
 from .util import gb, run_probe
@@ -11,11 +12,15 @@ def probe(store, host):
     except Exception as e:
         with store.lock:
             prev = store.hosts.get(host["name"]) or {}
-            prev.update({"ok": False, "error": str(e)[:300], "fail_at": t})
+            prev.update({"error": str(e)[:300], "fail_at": t})
+            if host.get("local") and prev.get("load"):
+                # The probe can fail on an overloaded machine. The load average costs nothing to read, so keep it current.
+                prev["load"] = list(os.getloadavg())
             store.hosts[host["name"]] = prev
         store.set_error("probe:" + host["name"], e)
         return
     d["at"] = t
+    d["ok"] = True
     with store.lock:
         prev = store.hosts.get(host["name"]) or {}
         d["swap_rate"] = swap_rate(prev, d, t)
@@ -54,7 +59,7 @@ def view(cfg, store, project_of, now):
             v.update(status="down", error=d.get("error") or "no data yet")
             out.append(v)
             continue
-        reachable = bool(d.get("ok")) and now - d.get("at", 0) < 180
+        reachable = now - d.get("at", 0) < 180
         cores = d.get("cores") or 1
         hist = store.load_hist.get(h["name"], [])
         cpu_s = [x[2] for x in hist[-3:]] or [d.get("cpu_util") or 0]

@@ -152,12 +152,17 @@ def cmd_service(args):
   <key>ProgramArguments</key><array>%s</array>
   <key>WorkingDirectory</key><string>%s</string>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string><key>Nice</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>%s</string><key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
 """ % (LABEL, argv, here, logf, logf))
         subprocess.run(["launchctl", "bootout", "gui/%d/%s" % (uid, LABEL)], capture_output=True)
-        subprocess.run(["launchctl", "bootstrap", "gui/%d" % uid, path], check=True)
+        for i in range(10):  # bootout finishes in the background; bootstrap fails until it is done
+            if subprocess.run(["launchctl", "bootstrap", "gui/%d" % uid, path], capture_output=True).returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            sys.exit("launchctl bootstrap failed; try again in a few seconds")
         print("installed %s\nlog: %s\nrestart: launchctl kickstart -k gui/%d/%s" % (path, logf, uid, LABEL))
     else:
         path = os.path.expanduser("~/.config/systemd/user/fleet-control.service")
@@ -168,7 +173,7 @@ def cmd_service(args):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write("[Unit]\nDescription=Fleet Control\nAfter=network-online.target\n\n[Service]\nExecStart=%s\nWorkingDirectory=%s\n"
-                    "Restart=always\nNice=5\n\n[Install]\nWantedBy=default.target\n" % (" ".join([py, script, "serve"] + extra), here))
+                    "Restart=always\n\n[Install]\nWantedBy=default.target\n" % (" ".join([py, script, "serve"] + extra), here))
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         subprocess.run(["systemctl", "--user", "enable", "--now", "fleet-control"], check=True)
         print("installed %s\nlog: journalctl --user -u fleet-control -f\n"
