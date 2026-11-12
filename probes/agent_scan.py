@@ -2,7 +2,10 @@
 """Fleet Control agent-usage scan. Reads Codex rollouts (~/.codex/sessions) and Claude Code
 transcripts (~/.claude/projects) and prints token use per session in hourly buckets.
 It is incremental: it keeps a byte offset per file in ~/.cache/fleet-control/scan-state.json,
-so later runs read only new lines. Bucket values: [uncached_in, cache_read, cache_write, out, requests]."""
+so later runs read only new lines. Bucket values: [uncached_in, cache_read, cache_write, out, requests, cache_write_1h]
+(cache_write_1h is the part of cache_write that went to the 1-hour cache).
+A request with a large prompt is counted under "<model>@L<k>" (for example gpt-6.1-sol@L272): its whole input
+(uncached + cache read + cache write) was over k thousand tokens. Some models cost more per token above such a size."""
 import datetime, glob, json, os, sys, time
 
 KEEP = 8 * 86400
@@ -21,11 +24,11 @@ def load_state():
     try:
         with open(STATE) as f:
             st = json.load(f)
-        if st.get("v") == 4:
+        if st.get("v") == 5:
             return st
     except Exception:
         pass
-    return {"v": 4, "files": {}}
+    return {"v": 5, "files": {}}
 
 
 def save_state(st):
@@ -36,10 +39,18 @@ def save_state(st):
     os.replace(tmp, STATE)
 
 
-def add(bk, t, model, unc, cr, cw, out):
+LONG = (272, 200, 100)  # prompt sizes (thousand tokens) where providers start a higher price tier
+
+
+def add(bk, t, model, unc, cr, cw, out, cw1h=0):
+    size = unc + cr + cw
+    for k in LONG:
+        if size > k * 1000:
+            model = "%s@L%d" % (model, k)
+            break
     h = bk.setdefault(str(int(t // 3600) * 3600), {})
-    v = h.setdefault(model, [0, 0, 0, 0, 0])
-    v[0] += unc; v[1] += cr; v[2] += cw; v[3] += out; v[4] += 1
+    v = h.setdefault(model, [0, 0, 0, 0, 0, 0])
+    v[0] += unc; v[1] += cr; v[2] += cw; v[3] += out; v[4] += 1; v[5] += cw1h
 
 
 def text_of(content):
@@ -172,8 +183,10 @@ def scan_claude(path, fs):
                 fs["cwd"] = o["cwd"]
             fs["sid"] = o.get("sessionId") or fs.get("sid")
             fs["model"] = model
+            cw = u.get("cache_creation_input_tokens", 0) or 0
+            cw1h = min(cw, ((u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0))
             add(bk, t, model, u.get("input_tokens", 0) or 0, u.get("cache_read_input_tokens", 0) or 0,
-                u.get("cache_creation_input_tokens", 0) or 0, u.get("output_tokens", 0) or 0)
+                cw, u.get("output_tokens", 0) or 0, cw1h)
             fs["last"] = t
             fs.setdefault("first", t)
         elif b'"type":"summary"' in raw[:60]:

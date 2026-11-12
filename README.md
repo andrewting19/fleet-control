@@ -70,6 +70,11 @@ uses the most quota.
 - **Usage pool:** each account is a band sized by its plan (for example Pro = 5 x Plus). The projection drains the
   pool at the recent rate (or the week average, if higher), from the account that resets first, and adds each
   account's share back at its reset.
+- **Tokens** come from the session logs that Codex and Claude Code write on each machine: every request's input
+  (uncached, cache read, cache write) plus output, counted once. Calls that leave no session log are not seen:
+  `claude -p` or SDK scripts that do not save sessions, and a few internal calls such as context compaction.
+- **$ weight** is tokens x API list price (`fleetctl/prices.toml`), including the higher price for large prompts
+  and for 1-hour cache writes. Subscriptions do not bill it; it shows which work is expensive.
 
 ## Security
 

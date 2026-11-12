@@ -152,7 +152,19 @@ class ScanTest(unittest.TestCase):
         cx = list(by["s1"]["bk"].values())[0]["gpt-6.1-sol"]
         cl = list(by["s2"]["bk"].values())[0]["claude-opus-5-5"]
         self.assertEqual(cx[:4], [400, 600, 0, 50])
-        self.assertEqual(cl, [10, 500, 20, 30, 1])
+        self.assertEqual(cl, [10, 500, 20, 30, 1, 0])
+
+    def test_prices(self):
+        from fleetctl.models import Models
+        m = Models({})
+        # Claude in a Codex log: no cache-write count, so uncached input is priced as a 1-hour cache write (2x input).
+        self.assertAlmostEqual(m.cost("anthropic/claude-opus-5-5", [1e6, 0, 0, 0, 1]), 8)
+        # Claude Code log: 5-minute and 1-hour writes are separate.
+        self.assertAlmostEqual(m.cost("claude-opus-5-5", [1e6, 0, 3e6, 0, 1, 1e6]), 4 + 2 * 5 + 8)
+        # Long prompts: GPT-6.1 Sol costs 2x input above 272K; a 200K mark is below its tier.
+        self.assertAlmostEqual(m.cost("gpt-6.1-sol@L272", [1e6, 0, 0, 1e6, 1]), 4 + 15)
+        self.assertAlmostEqual(m.cost("gpt-6.1-sol@L200", [1e6, 0, 0, 1e6, 1]), 2 + 10)
+        self.assertEqual(m.price("gpt-6.1-sol@L272"), m.price("gpt-6.1-sol"))
 
 
 class DemoTest(unittest.TestCase):

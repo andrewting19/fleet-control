@@ -1,4 +1,6 @@
-# API list prices in USD per 1M tokens: [input, output, cache read, cache write].
+# API list prices in USD per 1M tokens: [input, output, cache read, cache write, cache write 1h].
+# The 5th price (Anthropic only) is the 1-hour cache write, 2x input. Claude input in a Codex log has no cache-write
+# count, so Fleet Control prices it at this rate: the proxies that send Codex to Claude write it to the 1-hour cache.
 # Fleet Control uses them only to weigh token use ("$ weight"), so expensive work shows first.
 # Subscriptions do not bill these prices. Override or add models in config.toml under [prices].
 # A model name matches the longest key that it starts with. Then "families" are tried as substrings.
@@ -13,18 +15,24 @@
 "gpt-5.6-terra" = [2, 12, 0.2, 2.5]
 "gpt-5.6-luna" = [0.2, 1.2, 0.02, 0.25]
 "gpt-5" = [1.25, 10, 0.125, 1.25]
-"claude-opus-5-5" = [4, 20, 0.2, 5]
-"claude-opus-5" = [5, 25, 0.5, 6.25]
-"claude-opus-4" = [5, 25, 0.5, 6.25]
-"claude-sonnet-5-5" = [2, 10, 0.1, 2.5]
-"claude-sonnet-5" = [2, 10, 0.2, 2.5]
-"claude-sonnet-4" = [3, 15, 0.3, 3.75]
-"claude-haiku-5-5" = [0.1, 0.5, 0.01, 0.125]
-"claude-fable-5-2" = [8, 40, 0.2, 10]
-"claude-fable-5-1" = [10, 50, 0.25, 12.5]
-"claude-fable-5" = [10, 50, 1, 12.5]
+"claude-opus-5-5" = [4, 20, 0.2, 5, 8]
+"claude-opus-5" = [5, 25, 0.5, 6.25, 10]
+"claude-opus-4" = [5, 25, 0.5, 6.25, 10]
+"claude-sonnet-5-5" = [2, 10, 0.1, 2.5, 4]
+"claude-sonnet-5" = [2, 10, 0.2, 2.5, 4]
+"claude-sonnet-4" = [3, 15, 0.3, 3.75, 6]
+"claude-haiku-5-5" = [0.1, 0.5, 0.01, 0.125, 0.2]
+"claude-fable-5-2" = [8, 40, 0.2, 10, 16]
+"claude-fable-5-1" = [10, 50, 0.25, 12.5, 20]
+"claude-fable-5" = [10, 50, 1, 12.5, 20]
 "gemini-3-pro" = [2, 12, 0.2, 2.5]
 "grok-5" = [3, 15, 0.75, 3]
+
+# Higher price for requests with a large prompt: [prompt size where it starts, then the prices as above].
+[long]
+"gpt-6.1-sol" = [272000, 4, 15, 0.2, 5]
+"gpt-6.1-terra" = [272000, 2, 7.5, 0.1, 2.5]
+"claude-haiku-5-5" = [100000, 0.5, 2.5, 0.05, 0.625, 1]
 
 [families]
 opus = "claude-opus-5-5"
