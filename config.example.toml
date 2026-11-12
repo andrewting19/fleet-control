@@ -1,0 +1,108 @@
+# Fleet Control config. Copy to config.toml and edit. Every key is optional.
+# Check it with: python3 fleet.py check
+
+title = "Fleet Control"
+port = 10400
+bind = "127.0.0.1"            # "0.0.0.0" to open the page from other devices (see "allow")
+# allow = ["127.0.0.0/8", "::1/128", "100.64.0.0/10", "fd7a:115c:a1e0::/48"]   # who may read the page (default: this machine + Tailscale)
+
+# ---------------------------------------------------------------- machines
+# local = true: this machine. ssh = "alias": any host in ~/.ssh/config with key login (BatchMode).
+# Nothing is installed on the hosts: the probe script is streamed over SSH to python3 (3.6+), or to PowerShell on Windows.
+# scan = true: also read Codex and Claude Code session logs on that host for token use.
+# hidden = true: show it under "more machines". critical = false: do not raise a problem when it is unreachable.
+
+[[hosts]]
+name = "laptop"
+local = true
+scan = true
+
+[[hosts]]
+name = "gpu-box"
+ssh = "gpu-box"
+scan = true
+
+[[hosts]]
+name = "gaming-pc"
+ssh = "gaming-pc"            # Windows with the OpenSSH server
+os = "windows"
+critical = false
+
+[[hosts]]
+name = "nas"
+tailscale = "nas"            # no SSH: show only if Tailscale sees it online
+hidden = true
+
+[tailscale]
+enabled = false
+# cli = "/usr/local/bin/tailscale"
+
+# ---------------------------------------------------------------- accounts (quota of your model subscriptions)
+# Built-in types:
+#   codex        ChatGPT login of the Codex CLI or app on this machine. Reads ~/.codex; no network calls.
+#   claude_code  Claude Code login on this machine (experimental: uses the endpoint behind Claude Code's /usage).
+#   command      Any program that prints account JSON. Write one for your router or proxy. See docs/plugins.md.
+#   opencodex    The opencodex router (ocx CLI).
+
+[[accounts]]
+type = "codex"
+
+[[accounts]]
+type = "claude_code"
+
+# [[accounts]]
+# type = "command"
+# name = "my-router"
+# command = ["python3", "adapters/example_accounts.py"]
+
+# ---------------------------------------------------------------- thread names
+[[titles]]
+type = "codex"               # names from ~/.codex/session_index.jsonl
+# [[titles]]
+# type = "t3"                # T3 Code threads
+
+# ---------------------------------------------------------------- projects
+# Each process and agent session gets a project from its working folder. Your rules come first, then
+# built-in defaults (worktrees of agent apps, ~/code/<project>, ~/src/<project>, ~/<project>, ...).
+# (?P<p>...) captures the project, (?P<s>...) a sub-project. cmd = true also tries the process command line.
+# python3 fleet.py projects shows the busiest folders and how they map.
+
+# [[projects]]
+# match = '/monorepo/services/(?P<s>[^/]+)'
+# project = "monorepo"
+
+# project_defaults = true
+
+# ---------------------------------------------------------------- providers, plans and prices
+# Built in: openai (GPT), anthropic (Claude), google (Gemini), xai (Grok). Add or change any of them.
+# plan_weights size each plan's weekly limit in units of the smallest plan, for the pooled usage chart.
+
+# [providers.openai]
+# plan_weights = { plus = 1, pro = 5, pro_max = 20 }
+# [providers.mistral]
+# name = "Mistral"
+# color = "#ff7000"
+# match = ["mistral", "codestral"]
+
+# [prices]   # USD per 1M tokens: [input, output, cache read, cache write]. Defaults: fleetctl/prices.toml
+# "my-model" = [1, 4, 0.1, 1]
+
+# [ui.project_colors]
+# "web-app" = "#6aa8ff"
+
+# [thresholds]
+# cpu_warn = 80
+# cpu_crit = 95
+# load_warn = 1.0        # load per core; a CPU problem needs both high load and high CPU use
+# load_crit = 1.5
+# mem_free_warn = 12     # % of memory free
+# mem_free_crit = 5
+# disk_warn = 90
+# disk_crit = 95
+# iowait_warn = 30       # % of CPU time spent waiting for disk (Linux)
+
+# [intervals]            # seconds
+# probe = 20
+# scan = 120
+# accounts = 120
+# accounts_refresh = 600

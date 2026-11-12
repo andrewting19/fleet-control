@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%234cc38a'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <i class="ic ic-radar brand"></i><b id="title">Fleet Control</b><span id="demo" class="tag" hidden>demo data</span><span class="dot" id="lvl"></span><span id="status" data-tip="Show problems"></span><div id="issues"></div>
+  <span class="spacer"></span><span class="mut" id="age"></span><button id="priv" data-tip="Swap real names for made-up ones, for screenshots">Hide names</button><button id="refresh">Refresh</button>
+</header>
+<main>
+  <section>
+    <h2><i class="ic ic-gauge"></i>Usage left</h2>
+    <div id="pools"></div>
+  </section>
+
+  <section>
+    <h2><i class="ic ic-server"></i>Machines</h2>
+    <div id="hosts" class="hosts"></div>
+    <div id="more-hosts"></div>
+  </section>
+
+  <section>
+    <details id="mxd"><summary class="h2"><i class="ic ic-cpu"></i>CPU by project</summary><div id="matrix" style="margin-top:12px"></div></details>
+  </section>
+
+  <section>
+    <div class="head">
+      <h2><i class="ic ic-coins"></i>Token use</h2><span id="burn" class="mut"></span>
+      <div class="controls">
+        <div class="seg" data-k="win"><button data-v="1h">1h</button><button data-v="24h">24h</button><button data-v="7d">7d</button></div>
+        <div class="seg" data-k="prov" id="provseg"></div>
+        <div class="seg" data-k="metric"><button data-v="cost" data-tip="Tokens × API list price. Shows which work costs the most quota. Subscriptions do not bill this.">$ weight</button><button data-v="tok">Tokens</button></div>
+      </div>
+    </div>
+    <div class="card"><div id="chart"></div><div id="legend" class="legend"></div></div>
+    <div class="two">
+      <div class="card"><h3>Projects</h3><div id="projects"></div></div>
+      <div class="card"><h3>Threads</h3><div id="threads"></div></div>
+    </div>
+  </section>
+</main>
+<div id="tip" class="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>

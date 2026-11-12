@@ -1,0 +1,39 @@
+# API list prices in USD per 1M tokens: [input, output, cache read, cache write].
+# Fleet Control uses them only to weigh token use ("$ weight"), so expensive work shows first.
+# Subscriptions do not bill these prices. Override or add models in config.toml under [prices].
+# A model name matches the longest key that it starts with. Then "families" are tried as substrings.
+
+[models]
+"gpt-6.1-sol" = [2, 10, 0.1, 2.5]
+"gpt-6.1-terra" = [1, 5, 0.05, 1.25]
+"gpt-6-sol" = [2, 10, 0.2, 2.5]
+"gpt-6-astra" = [10, 50, 1, 12.5]
+"gpt-6-luna" = [0.1, 0.5, 0.01, 0.125]
+"gpt-5.6" = [5, 30, 0.5, 6.25]
+"gpt-5.6-terra" = [2, 12, 0.2, 2.5]
+"gpt-5.6-luna" = [0.2, 1.2, 0.02, 0.25]
+"gpt-5" = [1.25, 10, 0.125, 1.25]
+"claude-opus-5-5" = [4, 20, 0.2, 5]
+"claude-opus-5" = [5, 25, 0.5, 6.25]
+"claude-opus-4" = [5, 25, 0.5, 6.25]
+"claude-sonnet-5-5" = [2, 10, 0.1, 2.5]
+"claude-sonnet-5" = [2, 10, 0.2, 2.5]
+"claude-sonnet-4" = [3, 15, 0.3, 3.75]
+"claude-haiku-5-5" = [0.1, 0.5, 0.01, 0.125]
+"claude-fable-5-2" = [8, 40, 0.2, 10]
+"claude-fable-5-1" = [10, 50, 0.25, 12.5]
+"claude-fable-5" = [10, 50, 1, 12.5]
+"gemini-3-pro" = [2, 12, 0.2, 2.5]
+"grok-5" = [3, 15, 0.75, 3]
+
+[families]
+opus = "claude-opus-5-5"
+sonnet = "claude-sonnet-5-5"
+haiku = "claude-haiku-5-5"
+fable = "claude-fable-5-2"
+luna = "gpt-6-luna"
+terra = "gpt-6.1-terra"
+astra = "gpt-6-astra"
+gpt = "gpt-6.1-sol"
+gemini = "gemini-3-pro"
+grok = "grok-5"
