@@ -32,7 +32,7 @@ CG = Path("/sys/fs/cgroup")
 PARENT = "agentjobs.slice"
 LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
 CONF = Path("/etc/agentjobs.json")
-STARVE_S = 1800  # an older waiter blocks younger jobs only after it has waited this long
+STARVE_S = 3600  # after this wait, a queued job holds back the room it needs from younger jobs
 POLL = 3
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
@@ -523,7 +523,8 @@ def follow(jid):
 # ---------------------------------------------------------------- supervisor (runs inside the job)
 def admit(jid):
     """Wait for memory. A job starts as soon as it fits; it may pass an older waiter that does not fit.
-    When an older waiter has waited STARVE_S, younger jobs wait behind it so that it can start."""
+    When an older waiter has waited STARVE_S, its peak is held back from younger jobs, so that it can start;
+    younger jobs still start in the room that is left over."""
     last = 0
     while True:
         with Lock():
@@ -533,9 +534,10 @@ def admit(jid):
                 return False
             older = [m for m in jobs if m.get("state") == "queued" and m.get("created", 0) < me["created"] and m["id"] != jid]
             r = room(jobs)
-            blocked = any(now() - m.get("created", now()) > STARVE_S for m in older)
+            held = sum(m["peak_gb"] * GB for m in older if now() - m.get("created", now()) > STARVE_S)
+            blocked = held > 0 and r >= me["peak_gb"] * GB > r - held
             busy = cpu_busy(jobs)
-            if r >= me["peak_gb"] * GB and not blocked and not busy:
+            if r - held >= me["peak_gb"] * GB and not busy:
                 update(jid, state="run", started=now())
                 return True
         if now() - last > 600:
