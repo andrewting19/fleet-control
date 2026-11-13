@@ -98,7 +98,8 @@ function renderPools(s) {
 function renderPool(s, prov) {
   const P = (s.pools || {})[prov], el = $("#ac-" + prov), now = s.now;
   const accts = s.accounts.filter((a) => a.provider === prov).sort((x, y) => (y.weekly_reset || 0) - (x.weekly_reset || 0));
-  accts.forEach((a, i) => (a._c = ACOL[i % ACOL.length]));
+  // Colors follow the account name, so they do not move when the reset order changes.
+  accts.slice().sort((x, y) => (x.label || x.id).localeCompare(y.label || y.id)).forEach((a, i) => (a._c = ACOL[i % ACOL.length]));
   const head = $("#ah-" + prov);
   if (!P) { el.innerHTML = '<div class="mut">No quota data</div>'; head.textContent = ""; }
   else {
@@ -165,7 +166,7 @@ function renderPool(s, prov) {
   const leg = accts.slice().reverse().map((a) => {
     const left = a.weekly_used == null ? null : Math.max(0, 100 - a.weekly_used);
     const warn = a.status === "signed_out" ? ["c-crit", "signed out"] : a.runs_out_before_reset && a.eta ? [a.eta - s.now < 86400 ? "c-crit" : "c-warn", "runs out " + whenShort(a.eta)] : null;
-    return '<span class="li" data-tip="' + esc(a.label + " · " + (a.plan || "") + (a.weekly_reset ? "\nResets " + when(a.weekly_reset) : "") + (a.short_used != null ? "\nShort window " + Math.round(a.short_used) + "% used" : "")) + '"><span class="sw" style="background:' + a._c + '"></span>' + esc(short(a.label)) + (a.active ? ' <span style="color:var(--accent)">●</span>' : "") + " <b>" + (left == null ? "?" : Math.round(left) + "%") + "</b>" + (warn ? ' <span class="' + warn[0] + '">' + esc(warn[1]) + "</span>" : "") + "</span>";
+    return '<span class="li" data-tip="' + esc(a.label + " · " + (a.plan || "") + (a.weekly_reset ? "\nResets " + when(a.weekly_reset) : "") + (a.short_used != null ? "\nShort window " + Math.round(a.short_used) + "% used" : "")) + '"><span class="sw" style="background:' + a._c + '"></span>' + esc(short(a.label)) + (a.active ? ' <span class="mut small" data-tip="The router sends new requests to this account">active</span>' : "") + " <b>" + (left == null ? "?" : Math.round(left) + "%") + "</b>" + (warn ? ' <span class="' + warn[0] + '">' + esc(warn[1]) + "</span>" : "") + "</span>";
   }).join("");
   let h = '<table class="alist"><tr><th>Account</th><th class=n>Left</th><th>Weekly reset</th><th class=n data-tip="Short window, for example 5 hours">Short</th><th data-tip="Count, then the first expiry date">Resets</th><th></th></tr>';
   for (const a of accts.slice().reverse()) {
@@ -178,7 +179,7 @@ function renderPool(s, prov) {
     const fr = (a.resets || []).filter((r) => r.weekly), exps = fr.map((r) => r.expires).filter(Boolean).sort((x, y) => x - y);
     const frs = a.resets == null ? '<span class="dim">?</span>' : fr.length ? '<span data-tip="Expire: ' + esc(exps.map(dateOnly).join(", ")) + '">' + fr.length + (exps.length ? ' <span class="mut">· ' + dateOnly(exps[0]) + "</span>" : "") + "</span>" : '<span class="dim">0</span>';
     const share = P && P.weights[a.id] ? Math.round((100 * P.weights[a.id]) / P.units) + "% of pool" : "";
-    h += '<tr><td><span class="sw" style="background:' + a._c + '"></span>' + esc(a.label) + '<span class="tag" data-tip="' + esc(share) + '">' + esc((a.plan || "").replace("_", " ")) + "</span>" + (a.active ? '<span class="tag" style="color:var(--accent)">active</span>' : "") +
+    h += '<tr><td><span class="sw" style="background:' + a._c + '"></span>' + esc(a.label) + '<span class="tag" data-tip="' + esc(share) + '">' + esc((a.plan || "").replace("_", " ")) + "</span>" + (a.active ? '<span class="tag">active</span>' : "") +
       "</td><td class=n>" + (left == null ? "" : "<b>" + Math.round(left) + "%</b>") + "</td><td>" + (a.weekly_reset ? whenShort(a.weekly_reset) : "") +
       "</td><td class=n>" + (a.short_used != null ? Math.round(a.short_used) + "%" : "") + "</td><td>" + frs + '</td><td class="' + cls + '">' + esc(note) + "</td></tr>";
   }

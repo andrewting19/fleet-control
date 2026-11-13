@@ -99,14 +99,17 @@ def _past(hist, a, now):
     past = []
     for i, (r, gp) in enumerate(groups):
         start = r - WEEK
-        if start > lo and gp[0][0] > start:
+        # Before the first real sample of a week, assume use started at 0 at the week start. Keep this point even
+        # when the week started before the window, so the line still reaches the left edge.
+        if gp[0][0] > start:
             gp.insert(0, [start, 0])
         if past and gp[0][0] > past[-1][0]:
             past.append([gp[0][0], past[-1][1]])
         past.extend(gp)
         if i + 1 < len(groups) and r < groups[i + 1][1][0][0]:
             past.append([r, past[-1][1]])
-    return [[int(t), round(u, 1)] for t, u in past if t >= lo]
+    first = next((k for k, (t, _) in enumerate(past) if t >= lo), len(past))
+    return [[int(t), round(u, 1)] for t, u in past[max(0, first - 1):]]
 
 
 def interp(pts, t):
