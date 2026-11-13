@@ -143,11 +143,11 @@ def mem_pressure():
 
 def reserved(m):
     """Bytes a running job may still grow by. For GRACE_S after start: its stated peak.
-    Then: 1.5x the peak it has really used (at least 0.5 GB), never more than the stated peak."""
+    Then: 1.5x the peak it has really used (at least 0.2 GB), never more than the stated peak."""
     stated = int(m["peak_gb"] * GB)
     if now() - (m.get("started") or now()) > GRACE_S:
         seen = max(int(m.get("anon_peak") or 0), job_mem(m))
-        stated = min(stated, max(int(0.5 * GB), int(seen * 1.5)))
+        stated = min(stated, max(int(0.2 * GB), int(seen * 1.5)))
     return max(0, stated - job_mem(m))
 
 

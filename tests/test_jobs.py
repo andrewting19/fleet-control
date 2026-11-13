@@ -29,7 +29,7 @@ class Reserved(unittest.TestCase):
         self.assertAlmostEqual(self.run_job(age=30, anon_peak=0.1, mem_now=0.1), 5.9)
 
     def test_old_small_job_frees_its_reservation(self):
-        self.assertAlmostEqual(self.run_job(age=600, anon_peak=0.05, mem_now=0.05), 0.45)
+        self.assertAlmostEqual(self.run_job(age=600, anon_peak=0.05, mem_now=0.05), 0.15)
 
     def test_old_job_keeps_headroom_over_its_real_peak(self):
         self.assertAlmostEqual(self.run_job(age=600, anon_peak=2.0, mem_now=1.0), 2.0)
