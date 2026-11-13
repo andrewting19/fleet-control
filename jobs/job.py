@@ -155,6 +155,25 @@ def available():
     return 0
 
 
+def total_ram():
+    """Physical RAM in bytes (0 if unknown)."""
+    try:
+        if SYS == "Linux":
+            for ln in open("/proc/meminfo"):
+                if ln.startswith("MemTotal:"):
+                    return int(ln.split()[1]) * 1024
+        if SYS == "Darwin":
+            return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip())
+        if SYS == "Windows":
+            import ctypes
+            kb = ctypes.c_ulonglong()
+            ctypes.windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb))
+            return kb.value * 1024
+    except (OSError, ValueError, AttributeError):
+        pass
+    return 0
+
+
 def reservation_files():
     try:
         dirs = json.loads(CONF.read_text()).get("reservation_dirs", [])
@@ -257,6 +276,27 @@ def cmd_run(a):
     mem_gb = a.mem_gb or max(2.0, round(a.peak_gb * 1.5, 1))
     if a.peak_gb > mem_gb:
         sys.exit("job run: --peak-gb is more than --mem-gb")
+    lim = (total_ram() - MARGIN_GB * GB) if total_ram() else 0
+    if SYS == "Linux":
+        slim = cg_int(CG / PARENT / "memory.max")
+        if not slim:
+            try:  # the slice cgroup exists only while a job runs; ask systemd for the configured cap
+                v = subprocess.run(["systemctl", "show", PARENT, "-p", "MemoryMax", "--value"],
+                                   capture_output=True, text=True, timeout=5).stdout.strip()
+                slim = int(v) if v.isdigit() else 0
+            except (OSError, subprocess.SubprocessError, ValueError):
+                slim = 0
+        if slim:
+            lim = min(lim, slim) if lim else slim
+    if lim > 0:
+        lim_gb = lim / GB
+        if a.peak_gb > lim_gb * 0.9:
+            sys.exit("job run: --peak-gb %g is too big for this host. Agent jobs here may use %.0f GB in total. "
+                     "Split the job into smaller parts, or run it on a bigger host." % (a.peak_gb, lim_gb))
+        mem_gb = min(mem_gb, round(lim_gb, 1))
+    fits = room(all_jobs()) / GB
+    if fits < a.peak_gb:
+        print("job run: only %.1f GB is free for jobs now. This job waits until %g GB is free." % (max(0, fits), a.peak_gb), file=sys.stderr)
     owner = a.owner or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or ""
     d = STATE / jid
     d.mkdir()
