@@ -91,9 +91,12 @@ Linux, macOS and Windows):
     ssh HOST job run --project P --owner "$CODEX_THREAD_ID" --peak-gb 4 -- python train.py
     job ls | job logs ID | job wait ID --timeout 600 | job stop ID
 
-Each job outlives the shell, waits until the machine has --peak-gb free, stops at --mem-gb (Linux: cgroup MemoryMax in
-agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog), runs at low
-CPU priority, and records owner, exit code and peak memory in ~/.agentjobs/. On Linux, install it with
+Each job outlives the shell, waits until the machine has its peak memory free, stops at --mem-gb (Linux: cgroup
+MemoryMax in agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog),
+and records owner, exit code and peak memory in ~/.agentjobs/. The queue is built for speed without swap thrashing:
+--peak-gb is only a first guess, and later runs with the same project and name use the measured peak; a running job
+reserves only 1.5x what it has used after 2 minutes; no job starts while memory pressure (PSI) is high or the CPUs are
+far over capacity; math libraries get a thread count that fits the free CPUs. On Linux, install it with
 'sudo python3 jobs/job.py install --max-gb M'. Fleet Control shows the jobs of each machine and warns when
 a job is killed, with the owner thread. Add the rule to your agents' global AGENTS.md or CLAUDE.md, so that they use it.
 
