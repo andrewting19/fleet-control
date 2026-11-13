@@ -37,6 +37,8 @@ POLL = 3
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
 ENDED = ("done", "failed", "killed", "stopped", "lost")
+THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+               "VECLIB_MAXIMUM_THREADS", "NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "RAYON_NUM_THREADS")
 
 
 def now():
@@ -147,6 +149,86 @@ def reserved(m):
         seen = max(int(m.get("anon_peak") or 0), job_mem(m))
         stated = min(stated, max(int(0.5 * GB), int(seen * 1.5)))
     return max(0, stated - job_mem(m))
+
+
+def name_key(name):
+    """Jobs whose names differ only in digits (dates, shard numbers) are the same kind of job."""
+    return re.sub(r"\d+", "#", name or "")
+
+
+def history_peak(project, name, jobs=None):
+    """(GB, runs): the peak to expect for this kind of job: 1.25x the largest of its last 5 good runs.
+    If the newest ended run was killed at its cap, the real peak is unknown: use 1.5x that cap.
+    Returns (None, 0) when there is no history."""
+    key, got = name_key(name), []
+    for m in reversed(all_jobs() if jobs is None else jobs):
+        if m.get("project") != project or name_key(m.get("name")) != key:
+            continue
+        ran = (m.get("ended") or 0) - (m.get("started") or m.get("ended") or 0)
+        if m.get("state") == "done" and m.get("peak_bytes") and ran > 20:
+            got.append(m["peak_bytes"] / GB)
+        elif m.get("state") == "killed" and "cap" in (m.get("why") or ""):
+            if not got:
+                return round(float(m.get("mem_gb") or 0) * 1.5, 2), 1
+            break  # older runs were before the kill: a later good run is the better guide
+        if len(got) >= 5:
+            break
+    if not got:
+        return None, 0
+    return max(0.25, round(max(got) * 1.25, 2)), len(got)
+
+
+def plan(project, name, given, mem_given, jobs=None):
+    """(peak_gb, mem_gb, note). History wins over the caller's guess. The cap is loose (3x the peak), because
+    the queue and the slice cap protect the host; a tight cap only kills work when a guess is wrong."""
+    learned, n = history_peak(project, name, jobs)
+    peak = learned if learned else float(given or 2.0)
+    if mem_given:
+        mem = max(float(mem_given), round(peak * 1.5, 1)) if learned else float(mem_given)
+    else:
+        mem = max(2.0, round(peak * 3, 1), round(float(given or 0) * 1.5, 1))
+    note = "peak %g GB from %d earlier run%s" % (peak, n, "" if n == 1 else "s") if learned else ""
+    return peak, mem, note
+
+
+def cpu_busy(jobs):
+    """True when the CPUs are far over capacity and jobs already have a fair share: a new start would only
+    slow all the others down."""
+    if SYS != "Linux":
+        return False
+    n = os.cpu_count() or 1
+    try:
+        load1 = os.getloadavg()[0]
+        some = float(open("/proc/pressure/cpu").readline().split("avg10=")[1].split()[0])
+    except (OSError, IndexError, ValueError):
+        return False
+    running = sum(1 for m in jobs if m.get("state") == "run")
+    return load1 > 2.5 * n and some > 40 and running >= max(2, n // 4)
+
+
+def thread_env(m):
+    """The job's environment, with a thread count for math libraries that fits the free CPUs at start.
+    Without it each numpy/BLAS/OpenMP process starts one thread per core, and N jobs make N x cores threads."""
+    env = dict(os.environ)
+    auto = env.get("JOB_THREADS_AUTO") == "1"  # set by an outer job: not the caller's own choice
+    n = os.cpu_count() or 1
+    t = m.get("cpus")
+    if not t:
+        try:
+            load = os.getloadavg()[0]
+        except (OSError, AttributeError):
+            load = 0
+        t = max(4, min(16, n, n - load))
+    t = str(int(t))
+    changed = False
+    for k in THREAD_VARS:
+        if m.get("cpus") or auto or k not in env:
+            env[k] = t
+            changed = True
+    if changed:
+        env["JOB_THREADS_AUTO"] = "1"
+        print("[job] math threads per process: %s (set --cpus N or OMP_NUM_THREADS to choose)" % t, flush=True)
+    return env
 
 
 def unit_cgroup(m):
@@ -314,7 +396,10 @@ def cmd_run(a):
     name = slug(a.name or os.path.basename(cmd[0]) + "-" + "-".join(slug(x, 12) for x in cmd[1:3]), 30)
     jid = time.strftime("%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     project = slug(a.project or guess_project(cwd), 30).lower()
-    mem_gb = a.mem_gb or max(2.0, round(a.peak_gb * 1.5, 1))
+    given = a.peak_gb
+    a.peak_gb, mem_gb, note = plan(project, name, given, a.mem_gb)
+    if note:
+        print("job run: " + note + (" (you gave %g)" % given if given else ""), file=sys.stderr)
     if a.peak_gb > mem_gb:
         sys.exit("job run: --peak-gb is more than --mem-gb")
     lim = (total_ram() - margin()) if total_ram() else 0
@@ -343,7 +428,7 @@ def cmd_run(a):
     d.mkdir()
     m = {"id": jid, "name": name, "project": project, "owner": owner, "host": platform.node(), "os": SYS, "cmd": cmd,
          "cwd": cwd, "peak_gb": a.peak_gb, "mem_gb": mem_gb, "swap_gb": a.swap_gb, "state": "queued", "created": now(),
-         "passes": 0, "user": os.environ.get("USER") or os.environ.get("USERNAME") or "", "version": 1}
+         "peak_given": given, "cpus": a.cpus, "user": os.environ.get("USER") or os.environ.get("USERNAME") or "", "version": 1}
     log = d / "job.log"
     log.touch()
     if SYS == "Linux":
@@ -387,7 +472,7 @@ def systemd_launch(m):
                 "--uid", str(os.getuid()), "--gid", str(os.getgid()),
                 "-p", "WorkingDirectory=" + m["cwd"], "-p", "EnvironmentFile=" + str(d / "env"),
                 "-p", "MemoryMax=%dM" % int(m["mem_gb"] * 1024), "-p", "MemorySwapMax=%dM" % int(m["swap_gb"] * 1024),
-                "-p", "OOMScoreAdjust=500", "-p", "Nice=10", "-p", "CPUWeight=20", "-p", "IOWeight=20",
+                "-p", "OOMScoreAdjust=500",
                 "-p", "StandardOutput=append:" + str(log), "-p", "StandardError=append:" + str(log),
                 sys.executable, SELF, "_supervise", m["id"]]
     return subprocess.run(sr, capture_output=True, text=True)
@@ -403,6 +488,9 @@ def cmd_requeue(a):
         with Lock():  # hold the lock so the old supervisor cannot admit the job while we swap it
             if (read(m["id"]) or {}).get("state") != "queued":
                 continue
+            pk, mem, note = plan(m.get("project"), m.get("name"), m.get("peak_given") or m["peak_gb"], None)
+            if note and (pk != m["peak_gb"]):
+                m = update(m["id"], peak_given=m.get("peak_given") or m["peak_gb"], peak_gb=pk, mem_gb=max(mem, m["mem_gb"]))
             subprocess.run(pre + ["systemctl", "stop", m["unit"] + ".service"], capture_output=True)
             for _ in range(50):
                 if not unit_active(m["unit"]):
@@ -446,11 +534,13 @@ def admit(jid):
             older = [m for m in jobs if m.get("state") == "queued" and m.get("created", 0) < me["created"] and m["id"] != jid]
             r = room(jobs)
             blocked = any(now() - m.get("created", now()) > STARVE_S for m in older)
-            if r >= me["peak_gb"] * GB and not blocked:
+            busy = cpu_busy(jobs)
+            if r >= me["peak_gb"] * GB and not blocked and not busy:
                 update(jid, state="run", started=now())
                 return True
         if now() - last > 600:
-            print("[job] waiting for memory: need %.1f GB, room %.1f GB%s" % (me["peak_gb"], r / GB, ", an older job waits first" if blocked else ""), flush=True)
+            print("[job] waiting: need %.1f GB, room %.1f GB%s%s" % (me["peak_gb"], r / GB, ", an older job waits first" if blocked else "",
+                                                                     ", the CPUs are over capacity" if busy else ""), flush=True)
             last = now()
         time.sleep(POLL)
 
@@ -488,7 +578,7 @@ def supervise(jid):
 
 
 def posix_run(m):
-    p = subprocess.Popen(m["cmd"], cwd=m["cwd"], start_new_session=True,
+    p = subprocess.Popen(m["cmd"], cwd=m["cwd"], start_new_session=True, env=thread_env(m),
                          preexec_fn=(lambda: os.nice(10)) if SYS == "Darwin" else None)
     update(m["id"], child_pid=p.pid, child_pgid=p.pid)
     m["child_pgid"] = p.pid
@@ -601,10 +691,10 @@ def cmd_ls(a):
         return
     print("%-24s %-8s %-14s %-22s %7s %7s %5s %7s  %s" % ("ID", "STATE", "PROJECT", "NAME", "MEM", "PEAK", "CAP", "AGE", "OWNER"))
     for m in jobs:
-        age = (m.get("ended") or now()) - (m.get("started") or m.get("created"))
+        age = (m.get("ended") or now()) - (m.get("started") or m.get("created") or now())
         print("%-24s %-8s %-14s %-22s %6.1fG %6.1fG %4gG %6.0fm  %s" % (
-            m["id"], m.get("state"), m.get("project", "")[:14], m.get("name", "")[:22], (m.get("mem_now") or 0) / GB,
-            (m.get("peak_bytes") or 0) / GB, m.get("mem_gb"), age / 60, (m.get("owner") or "")[:36]))
+            m["id"], m.get("state"), (m.get("project") or "")[:14], (m.get("name") or "")[:22], (m.get("mem_now") or 0) / GB,
+            (m.get("peak_bytes") or 0) / GB, m.get("mem_gb") or 0, age / 60, (m.get("owner") or "")[:36]))
     print("room for a new job now: %.1f GB" % (room(all_jobs()) / GB))
 
 
@@ -661,13 +751,14 @@ def cmd_install(a):
     if os.geteuid() != 0:
         sys.exit("run with sudo")
     tot = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / GB
-    mx = a.max_gb or round(tot * 0.35)
+    mx = a.max_gb or round(tot * 0.85)
     Path("/etc/systemd/system/agentjobs.slice").write_text(
         "# All agent batch jobs started with 'job run' (agentjobs-<project>.slice below this one).\n"
         "# The cap is for all of them together, so they cannot take the memory of services.\n"
         "[Unit]\nDescription=Agent batch jobs (job run)\nBefore=slices.target\n\n"
         "# No MemoryHigh: above it, with swap full, the kernel slows a job for hours and never kills it.\n"
-        "[Slice]\nCPUWeight=20\nIOWeight=20\nMemoryMax=%dG\n" % mx)
+        "# Normal CPU and IO weight: an agent that uses the queue must not run slower than one that does not.\n"
+        "[Slice]\nMemoryMax=%dG\n" % mx)
     dst = "/usr/local/bin/job"
     if os.path.realpath(dst) != SELF:
         data = Path(SELF).read_bytes()
@@ -685,8 +776,10 @@ def main():
     r.add_argument("--name")
     r.add_argument("--owner")
     r.add_argument("--cwd")
-    r.add_argument("--peak-gb", type=float, default=2.0, help="memory the job needs at its peak (admission)")
-    r.add_argument("--mem-gb", type=float, help="hard cap; default 1.5x peak, at least 2")
+    r.add_argument("--peak-gb", type=float, help="your guess of the peak memory, for a new kind of job (default 2); "
+                   "later runs with the same project and name use the measured peak")
+    r.add_argument("--mem-gb", type=float, help="hard cap; default 3x peak, at least 2")
+    r.add_argument("--cpus", type=int, help="threads for math libraries; default fits the free CPUs at start")
     r.add_argument("--swap-gb", type=float, default=1.0, help="swap the job may use (Linux)")
     r.add_argument("--wait", action="store_true", help="stay in the foreground: print the log, exit with the job's code")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
