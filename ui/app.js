@@ -252,12 +252,13 @@ function renderHosts(s) {
     const stale = !h.reachable, disk = h.disks.slice().sort((a, b) => b.pct - a.pct)[0];
     HOSTMAP[h.name] = h;
     const big = (l, pct, col, tip) => '<div class="m" data-mtip="' + esc(h.name + "|" + l) + '"><div class="mh"><span>' + l + "</span><b" + (col !== "var(--barok)" ? ' style="color:' + col + '"' : "") + ">" + Math.round(pct) + '%</b></div><div class="bar"><i style="width:' + Math.min(100, Math.max(0, pct)) + "%;background:" + col + '"></i></div></div>';
+    const none = (l, why) => '<div class="m"><div class="mh"><span>' + l + '</span><span class="mut">' + why + '</span></div><div class="bar"></div></div>';
     const thc = h.thrash === "crit" ? "var(--crit)" : h.thrash === "warn" ? "var(--warn)" : "var(--barok)";
     let x = '<div class="host ' + h.status + (stale ? " stale" : "") + '"><div class="hh">' + OSIC(h) + '<b>' + esc(h.name) + '</b><span class="dot ' + h.status + '"></span>'  + (h.label !== h.name ? '<span class="dim small">' + esc(h.label) + "</span>" : "") + (stale ? '<span class="mut c-warn" data-tip="' + esc(h.error || "No answer from this machine") + '">no data for ' + rel(-h.age).replace(" ago", "") + "</span>" : "") + (h.active_sessions ? '<span class="mut" data-tip="Agent sessions active in the last 15 min">' + h.active_sessions + (h.active_sessions > 1 ? " agents" : " agent") + "</span>" : "") + jobPill(h) + '</div><div class="ms">';
     x += big("CPU", h.cpu, barColor(h.cpu, 80, 95), "Load " + h.load[0].toFixed(1) + " on " + h.cores + " cores" + (h.hog && h.hog.cores >= 0.3 ? "\nTop: " + h.hog.project + (h.hog.sub ? " / " + h.hog.sub : "") + ", " + h.hog.cores + " cores" : ""));
     x += big("Memory", h.mem_pct, barColor(h.mem_pct, 88, 95), fmtB(h.mem_total - h.mem_avail) + " of " + fmtB(h.mem_total) + " used");
-    x += h.swap_total ? big("Swap", h.swap_pct, thc, fmtB(h.swap_used) + " of " + fmtB(h.swap_total) + " used" + (h.thrash !== "ok" ? "\nThrashing: " + h.thrash_why : "\nNo thrashing (full swap alone is fine)")) : '<div class="m"></div>';
-    x += disk ? big("Disk", disk.pct, barColor(disk.pct, 90, 95), h.disks.map((d) => d.mount + ": " + Math.round(d.pct) + "%, " + fmtB(d.total - d.used) + " free").join("\n")) : '<div class="m"></div>';
+    x += h.swap_total ? big("Swap", h.swap_pct, thc, fmtB(h.swap_used) + " of " + fmtB(h.swap_total) + " used" + (h.thrash !== "ok" ? "\nThrashing: " + h.thrash_why : "\nNo thrashing (full swap alone is fine)")) : none("Swap", "no swap");
+    x += disk ? big("Disk", disk.pct, barColor(disk.pct, 90, 95), h.disks.map((d) => d.mount + ": " + Math.round(d.pct) + "%, " + fmtB(d.total - d.used) + " free").join("\n")) : none("Disk", "no data");
     x += "</div>";
     // details: everything else
     let d = '<div class="kv">' + h.cores + " cores · " + fmtB(h.mem_total) + " RAM" + (h.gpus || []).map((g) => " · " + esc(g.name) + " " + Math.round(g.util) + "%").join("") + "</div>";

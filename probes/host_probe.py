@@ -19,7 +19,8 @@ SKIP_MOUNTS = ("/System/Volumes/VM", "/System/Volumes/Preboot", "/System/Volumes
 def disks():
     out, seen = [], set()
     import re
-    for ln in sh("df -kP 2>/dev/null").splitlines()[1:]:
+    # -l: local disks only. Without it, one dead network mount (sshfs, NFS) makes df hang and all disks go missing.
+    for ln in sh("df -kPl 2>/dev/null").splitlines()[1:]:
         m = re.match(r"^(.*?)\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+(.*)$", ln)
         if not m:
             continue
