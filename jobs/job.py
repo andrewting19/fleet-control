@@ -16,7 +16,9 @@ queue, and several of them can push a machine into swap thrashing. Each job here
   - runs at low CPU priority, and is killed before services when memory runs out (oom_score_adj 500),
   - records owner (CODEX_THREAD_ID or --owner), project, command, exit code and peak memory in ~/.agentjobs/ID/.
 Linux jobs go to agentjobs-<project>.slice under agentjobs.slice; 'job install' caps that parent slice, so all
-agent jobs together cannot take the memory of services. Admission also respects Remora's finite_job reservations.
+agent jobs together cannot take the memory of services. Admission also respects the reservations of other job
+tools that list them in /etc/agentjobs.json: {"reservation_dirs": ["/dev/shm/x"]}, one JSON file for each job with
+"state" ("run"), "pid", "peak_gb" and "scopes" (cgroup paths).
 """
 import argparse, json, os, platform, re, shlex, signal, subprocess, sys, time, uuid
 from pathlib import Path
@@ -29,7 +31,7 @@ MARGIN_GB = float(os.environ.get("AGENTJOBS_MARGIN_GB", "6" if SYS == "Linux" el
 CG = Path("/sys/fs/cgroup")
 PARENT = "agentjobs.slice"
 LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
-REMORA = Path("/dev/shm/remora-jobmem")
+CONF = Path("/etc/agentjobs.json")
 MAX_PASSES = 8
 POLL = 10
 ENDED = ("done", "failed", "killed", "stopped", "lost")
@@ -153,10 +155,18 @@ def available():
     return 0
 
 
-def remora_unused():
-    """Memory that Remora's finite_job supervisors have reserved but not used yet (Linux only)."""
+def reservation_files():
+    try:
+        dirs = json.loads(CONF.read_text()).get("reservation_dirs", [])
+    except (OSError, ValueError, AttributeError):
+        dirs = []
+    return [p for d in dirs if Path(d).is_dir() for p in Path(d).glob("*.json")]
+
+
+def others_unused():
+    """Memory that other job tools have reserved for running jobs but not used yet (Linux only)."""
     tot = 0
-    for p in REMORA.glob("*.json") if REMORA.is_dir() else []:
+    for p in reservation_files():
         try:
             e = json.loads(p.read_text())
             if e.get("state") != "run" or not Path("/proc/%s" % e.get("pid")).exists():
@@ -175,7 +185,7 @@ def room(jobs):
         lim = cg_int(CG / PARENT / "memory.high") or cg_int(CG / PARENT / "memory.max")
         if lim:
             r = min(r, lim - (cg_int(CG / PARENT / "memory.current") or 0))
-        r -= remora_unused()
+        r -= others_unused()
     for m in jobs:
         if m.get("state") == "run":
             r -= max(0, int(m["peak_gb"] * GB) - job_mem(m))
