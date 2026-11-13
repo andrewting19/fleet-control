@@ -98,3 +98,27 @@ class Threads(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeldBack(unittest.TestCase):
+    """Room that a younger job must leave for an older waiter."""
+
+    def held(self, me_peak, waiters, r=2.0, running_gb=10.0):
+        me = {"id": "me", "peak_gb": me_peak, "created": 9000, "state": "queued"}
+        jobs = [me, {"id": "r", "state": "run", "peak_gb": running_gb}]
+        jobs += [{"id": "w%d" % i, "state": "queued", "peak_gb": p, "created": c} for i, (p, c) in enumerate(waiters)]
+        with mock.patch.object(job, "now", return_value=10000), mock.patch.object(job, "job_mem", return_value=0), \
+                mock.patch.object(job, "reserved", return_value=int(running_gb * GB)):
+            return job.held_back(me, jobs, r * GB) / GB
+
+    def test_only_the_oldest_starved_waiter_holds_room(self):
+        self.assertAlmostEqual(self.held(3.0, [(6.0, 100), (8.0, 200)]), 6.0)
+
+    def test_a_waiter_that_cannot_fit_on_an_empty_host_holds_nothing(self):
+        self.assertAlmostEqual(self.held(3.0, [(20.0, 100)]), 0.0)
+
+    def test_a_small_job_passes_the_hold(self):
+        self.assertAlmostEqual(self.held(0.5, [(6.0, 100)]), 0.0)
+
+    def test_a_recent_waiter_holds_nothing(self):
+        self.assertAlmostEqual(self.held(3.0, [(6.0, 8000)]), 0.0)

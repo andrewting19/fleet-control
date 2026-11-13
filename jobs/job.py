@@ -33,6 +33,7 @@ PARENT = "agentjobs.slice"
 LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
 CONF = Path("/etc/agentjobs.json")
 STARVE_S = 3600  # after this wait, a queued job holds back the room it needs from younger jobs
+SMALL_GB = 1.0  # a job this small is not held back for an older waiter
 POLL = 3
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
@@ -521,10 +522,22 @@ def follow(jid):
 
 
 # ---------------------------------------------------------------- supervisor (runs inside the job)
+def held_back(me, jobs, r):
+    """Bytes of the room r that job 'me' must leave for an older waiter. Only the oldest waiter that has waited
+    STARVE_S holds room back, and only if it can fit when all running jobs have ended (if not, the hold helps
+    nobody). A job of SMALL_GB or less passes the hold: it delays the big job very little."""
+    if me["peak_gb"] <= SMALL_GB:
+        return 0
+    empty = r + sum(reserved(m) + job_mem(m) for m in jobs if m.get("state") == "run")
+    old = [m for m in jobs if m.get("state") == "queued" and m["id"] != me["id"] and m.get("created", 0) < me["created"]
+           and now() - m.get("created", now()) > STARVE_S and m["peak_gb"] * GB <= empty]
+    return min(old, key=lambda m: m.get("created", 0))["peak_gb"] * GB if old else 0
+
+
 def admit(jid):
     """Wait for memory. A job starts as soon as it fits; it may pass an older waiter that does not fit.
-    When an older waiter has waited STARVE_S, its peak is held back from younger jobs, so that it can start;
-    younger jobs still start in the room that is left over."""
+    When an older waiter has waited STARVE_S, its peak is held back from younger jobs (see held_back), so that it
+    can start; younger jobs still start in the room that is left over."""
     last = 0
     while True:
         with Lock():
@@ -532,9 +545,8 @@ def admit(jid):
             me = next(m for m in jobs if m["id"] == jid)
             if me.get("state") == "stopped":
                 return False
-            older = [m for m in jobs if m.get("state") == "queued" and m.get("created", 0) < me["created"] and m["id"] != jid]
             r = room(jobs)
-            held = sum(m["peak_gb"] * GB for m in older if now() - m.get("created", now()) > STARVE_S)
+            held = held_back(me, jobs, r)
             blocked = held > 0 and r >= me["peak_gb"] * GB > r - held
             busy = cpu_busy(jobs)
             if r - held >= me["peak_gb"] * GB and not busy:
