@@ -85,8 +85,12 @@ class Threads(unittest.TestCase):
         self.assertEqual(e["MKL_NUM_THREADS"], "4")
 
     def test_a_value_from_an_outer_job_is_not_the_callers_choice(self):
-        e = self.env(load=1, base={"OMP_NUM_THREADS": "4", "JOB_THREADS_AUTO": "1"})
+        e = self.env(load=1, base={"OMP_NUM_THREADS": "4", "JOB_THREADS_AUTO": "4"})
         self.assertEqual(e["OMP_NUM_THREADS"], "16")
+
+    def test_the_callers_value_wins_over_a_host_default(self):
+        e = self.env(load=1, base={"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "4", "JOB_THREADS_AUTO": "4"})
+        self.assertEqual((e["OMP_NUM_THREADS"], e["MKL_NUM_THREADS"]), ("1", "16"))
 
     def test_cpus_flag_wins(self):
         self.assertEqual(self.env(load=1, cpus=3, base={"OMP_NUM_THREADS": "9"})["OMP_NUM_THREADS"], "3")

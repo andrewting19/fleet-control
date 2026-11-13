@@ -210,7 +210,7 @@ def thread_env(m):
     """The job's environment, with a thread count for math libraries that fits the free CPUs at start.
     Without it each numpy/BLAS/OpenMP process starts one thread per core, and N jobs make N x cores threads."""
     env = dict(os.environ)
-    auto = env.get("JOB_THREADS_AUTO") == "1"  # set by an outer job: not the caller's own choice
+    auto = env.get("JOB_THREADS_AUTO")  # a value equal to this came from a host default or an outer job, not from the caller
     n = os.cpu_count() or 1
     t = m.get("cpus")
     if not t:
@@ -222,11 +222,11 @@ def thread_env(m):
     t = str(int(t))
     changed = False
     for k in THREAD_VARS:
-        if m.get("cpus") or auto or k not in env:
+        if m.get("cpus") or k not in env or env[k] == auto:
             env[k] = t
             changed = True
     if changed:
-        env["JOB_THREADS_AUTO"] = "1"
+        env["JOB_THREADS_AUTO"] = t
         print("[job] math threads per process: %s (set --cpus N or OMP_NUM_THREADS to choose)" % t, flush=True)
     return env
 
