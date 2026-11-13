@@ -94,7 +94,7 @@ Linux, macOS and Windows):
 Each job outlives the shell, waits until the machine has --peak-gb free, stops at --mem-gb (Linux: cgroup MemoryMax in
 agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog), runs at low
 CPU priority, and records owner, exit code and peak memory in ~/.agentjobs/. On Linux, install it with
-'sudo python3 jobs/job.py install --high-gb G --max-gb M'. Fleet Control shows the jobs of each machine and warns when
+'sudo python3 jobs/job.py install --max-gb M'. Fleet Control shows the jobs of each machine and warns when
 a job is killed, with the owner thread. Add the rule to your agents' global AGENTS.md or CLAUDE.md, so that they use it.
 
 ## Extend it

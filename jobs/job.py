@@ -6,7 +6,7 @@
   job logs ID [-n 50] [-f]
   job wait ID [--timeout S]      exit 0 ended, 1 still running at timeout, 2 missing or lost
   job stop ID
-  sudo job install [--high-gb G --max-gb M]   Linux: create agentjobs.slice, install /usr/local/bin/job
+  sudo job install [--max-gb M]  Linux: create agentjobs.slice, install /usr/local/bin/job
 
 Why: agents start batch jobs with nohup or '&' in an SSH shell. The job then has no owner, no memory limit, and no
 queue, and several of them can push a machine into swap thrashing. Each job here:
@@ -182,7 +182,7 @@ def room(jobs):
     """Bytes a new job may reserve now."""
     r = available() - MARGIN_GB * GB
     if SYS == "Linux":
-        lim = cg_int(CG / PARENT / "memory.high") or cg_int(CG / PARENT / "memory.max")
+        lim = cg_int(CG / PARENT / "memory.max")
         if lim:
             r = min(r, lim - (cg_int(CG / PARENT / "memory.current") or 0))
         r -= others_unused()
@@ -521,20 +521,20 @@ def cmd_install(a):
     if os.geteuid() != 0:
         sys.exit("run with sudo")
     tot = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / GB
-    high = a.high_gb or round(tot * 0.35)
-    mx = a.max_gb or round(high * 1.15)
+    mx = a.max_gb or round(tot * 0.35)
     Path("/etc/systemd/system/agentjobs.slice").write_text(
         "# All agent batch jobs started with 'job run' (agentjobs-<project>.slice below this one).\n"
         "# The cap is for all of them together, so they cannot take the memory of services.\n"
         "[Unit]\nDescription=Agent batch jobs (job run)\nBefore=slices.target\n\n"
-        "[Slice]\nCPUWeight=20\nIOWeight=20\nMemoryHigh=%dG\nMemoryMax=%dG\n" % (high, mx))
+        "# No MemoryHigh: above it, with swap full, the kernel slows a job for hours and never kills it.\n"
+        "[Slice]\nCPUWeight=20\nIOWeight=20\nMemoryMax=%dG\n" % mx)
     dst = "/usr/local/bin/job"
     if os.path.realpath(dst) != SELF:
         data = Path(SELF).read_bytes()
         Path(dst).write_bytes(data)
         os.chmod(dst, 0o755)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
-    print("agentjobs.slice: MemoryHigh=%dG MemoryMax=%dG of %.0f GB RAM; %s installed" % (high, mx, tot, dst))
+    print("agentjobs.slice: MemoryMax=%dG of %.0f GB RAM; %s installed" % (mx, tot, dst))
 
 
 def main():
@@ -562,7 +562,6 @@ def main():
     s = sp.add_parser("stop")
     s.add_argument("id")
     i = sp.add_parser("install")
-    i.add_argument("--high-gb", type=float)
     i.add_argument("--max-gb", type=float)
     sv = sp.add_parser("_supervise")
     sv.add_argument("id")
