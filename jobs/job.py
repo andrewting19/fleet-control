@@ -567,10 +567,12 @@ def supervise(jid):
     if not admit(jid):
         return
     print("[job] start %s: %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(shlex.quote(x) for x in m["cmd"])), flush=True)
-    if SYS == "Windows":
-        rc, sig, peak, why = win_run(m)
-    else:
-        rc, sig, peak, why = posix_run(m)
+    try:
+        rc, sig, peak, why = win_run(m) if SYS == "Windows" else posix_run(m)
+    except OSError as e:  # the command cannot start (missing program or cwd): end as failed, not as a job that runs
+        print("[job] cannot start: %s" % e, flush=True)
+        update(jid, error=str(e)[-500:])
+        rc, sig, peak, why = 127, None, 0, None
     if SYS == "Linux":
         cgd = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[-1]
         # memory.peak counts file cache too, so it is too high for --peak-gb; keep it apart, report the anon peak
