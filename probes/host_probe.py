@@ -271,12 +271,42 @@ def mac():
             "mem_free_level": level, "page_size": pg, "mem_top": mtop, "procs": res, "uptime": up}
 
 
+def agentjobs():
+    """Jobs started with 'job run' (jobs/job.py): running and queued ones, and ones that ended in the last 6 hours."""
+    base = os.path.expanduser("~/.agentjobs")
+    out = []
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return out
+    cut = time.time() - 6 * 3600
+    for n in names:
+        try:
+            m = json.load(open(os.path.join(base, n, "meta.json")))
+        except Exception:
+            continue
+        if m.get("state") in ("done", "failed", "killed", "stopped", "lost") and (m.get("ended") or 0) < cut:
+            continue
+        mem = m.get("mem_now") or 0
+        if m.get("unit") and m.get("state") == "run":
+            try:
+                mem = int(open("/sys/fs/cgroup/agentjobs.slice/%s/%s.service/memory.current" % (m["slice"], m["unit"])).read())
+            except Exception:
+                pass
+        e = {k: m.get(k) for k in ("id", "name", "project", "owner", "state", "created", "started", "ended", "exit",
+                                   "signal", "why", "peak_gb", "mem_gb", "peak_bytes", "passes")}
+        e.update(mem_now=mem, cmd=" ".join(m.get("cmd") or [])[:300])
+        out.append(e)
+    return sorted(out, key=lambda m: m.get("created") or 0)[-30:]
+
+
 def main():
     t = time.time()
     data = {"ok": True, "hostname": socket.gethostname(), "os": platform.system(), "cores": os.cpu_count(), "load": list(os.getloadavg())}
     data.update(mac() if sys.platform == "darwin" else linux())
     data["disks"] = disks()
     data["gpus"] = gpus()
+    data["jobs"] = agentjobs()
     data["ts"] = time.time()
     data["probe_ms"] = int((time.time() - t) * 1000)
     print(json.dumps(data))

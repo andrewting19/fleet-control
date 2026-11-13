@@ -82,6 +82,21 @@ The server binds to `127.0.0.1` by default. With `bind = "0.0.0.0"`, only client
 (default: this machine and Tailscale). It only reads: it never logs in, spends resets or changes a host.
 The page shows process command lines and folder paths, so do not expose it to the internet.
 
+## Agent jobs
+
+Agents often start batch work with nohup or '&' over SSH. Such a job has no owner, no memory limit and no queue, and
+several of them can push a machine into swap thrashing. jobs/job.py is a single file with no dependencies (Python 3.9+,
+Linux, macOS and Windows):
+
+    ssh HOST job run --project P --owner "$CODEX_THREAD_ID" --peak-gb 4 -- python train.py
+    job ls | job logs ID | job wait ID --timeout 600 | job stop ID
+
+Each job outlives the shell, waits until the machine has --peak-gb free, stops at --mem-gb (Linux: cgroup MemoryMax in
+agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog), runs at low
+CPU priority, and records owner, exit code and peak memory in ~/.agentjobs/. On Linux, install it with
+'sudo python3 jobs/job.py install --high-gb G --max-gb M'. Fleet Control shows the jobs of each machine and warns when
+a job is killed, with the owner thread. Add the rule to your agents' global AGENTS.md or CLAUDE.md, so that they use it.
+
 ## Extend it
 
 `docs/plugins.md` describes the account source JSON, Python sources, title sources, and how to read another

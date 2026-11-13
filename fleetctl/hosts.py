@@ -72,6 +72,7 @@ def view(cfg, store, project_of, now):
                   "gpus": d.get("gpus", []), "uptime": d.get("uptime"), "at": d.get("at"), "age": int(now - d.get("at", now)),
                   "reachable": reachable, "error": None if reachable else d.get("error"), "hist": hist[-180:]})
         v["procs"], v["projects"] = _procs(d, project_of)
+        v["jobs"] = d.get("jobs") or []
         _swap(v, d, h, hist, project_of)
         v["status"], v["reasons"] = _status(v, h, th)
         hog = next((e for e in v["projects"] if e["project"] != "system"), None) or (v["projects"][0] if v["projects"] else None)
@@ -198,6 +199,12 @@ def issues(hosts, add):
                 hg = h["hog"]
                 who = "%s%s uses %.1f cores" % (hg["project"], " / " + hg["sub"] if hg["sub"] else "", hg["cores"])
             add(h["status"], "machine", "%s: %s" % (h["name"], "; ".join(h["reasons"])), who, fix)
+        for j in h.get("jobs") or []:
+            # A job that the memory cap stopped, or whose supervisor died, in the last 2 hours: tell its owner.
+            if j.get("state") in ("killed", "lost") and time.time() - (j.get("ended") or 0) < 7200:
+                add("warn", "machine", "%s: job %s (%s) %s" % (h["name"], j.get("name"), j.get("project"),
+                                                              j.get("why") or ("was lost" if j["state"] == "lost" else "was killed")),
+                    "owner thread %s" % j["owner"] if j.get("owner") else None, "job logs %s" % j["id"])
         if h.get("cores") and h["thrash"] == "ok" and (h["swap_pct"] or 0) >= 90 and h["mem_top"]:
             p = max(h["mem_top"], key=lambda x: x.get("swap", 0))
             if p.get("swap"):

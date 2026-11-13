@@ -45,12 +45,26 @@ function Info($x) {
 $procs = @($pp | Sort-Object PercentProcessorTime -Descending | Select-Object -First 25 | Where-Object { $_.PercentProcessorTime -gt 0 } | ForEach-Object { Info $_ })
 $mtop = @($pp | Sort-Object WorkingSetPrivate -Descending | Select-Object -First 8 | ForEach-Object { Info $_ })
 $load = [Math]::Round($cpu / 100 * $cores + $queue, 2)
+# Jobs started with 'job run' (jobs/job.py): running, queued, and ended in the last 6 hours.
+$jobs = @()
+$jd = Join-Path $env:USERPROFILE '.agentjobs'
+if (Test-Path $jd) {
+  $cut = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 21600
+  foreach ($dir in (Get-ChildItem $jd -Directory)) {
+    try {
+      $m = Get-Content (Join-Path $dir.FullName 'meta.json') -Raw | ConvertFrom-Json
+      if (-not (@('done', 'failed', 'killed', 'stopped', 'lost') -contains $m.state) -or $m.ended -ge $cut) {
+        $jobs += @{ id = $m.id; name = $m.name; project = $m.project; owner = $m.owner; state = $m.state; created = $m.created; started = $m.started; ended = $m.ended; exit = $m.exit; why = $m.why; peak_gb = $m.peak_gb; mem_gb = $m.mem_gb; peak_bytes = $m.peak_bytes; mem_now = $m.mem_now; cmd = ($m.cmd -join ' ') }
+      }
+    } catch {}
+  }
+}
 $out = @{
   ok = $true; hostname = $env:COMPUTERNAME; os = 'Windows'; cores = $cores; load = @($load, $load, $load); cpu_util = $cpu
   mem_total = [double]$cs.TotalPhysicalMemory; mem_avail = [double]$mem.AvailableBytes
   swap_total = $swapTotal; swap_used = $swapUsed
   page_size = 1; swap_rate_1s = @{ in = $swapIn; out = $swapOut }
-  disks = $disks; gpus = $gpus; procs = $procs; mem_top = $mtop
+  disks = $disks; gpus = $gpus; jobs = $jobs; procs = $procs; mem_top = $mtop
   uptime = [int]($now - $os.LastBootUpTime).TotalSeconds; probe_ms = [int]($now - $t0).TotalMilliseconds
 }
 $out | ConvertTo-Json -Compress -Depth 5

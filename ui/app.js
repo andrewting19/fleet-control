@@ -188,6 +188,26 @@ function renderPool(s, prov) {
 
 
 // ---------------------------------------------------------------- machines
+// Jobs started with "job run" (jobs/job.py): memory-capped, queued for memory, with an owner thread.
+const JOB_BAD = { killed: "c-warn", lost: "c-warn", failed: "c-warn" };
+function jobPill(h) {
+  const js = h.jobs || [], run = js.filter((j) => j.state === "run").length, q = js.filter((j) => j.state === "queued").length;
+  const bad = js.filter((j) => JOB_BAD[j.state]).length;
+  if (!run && !q && !bad) return "";
+  const t = [run && run + " running", q && q + " waiting for memory", bad && bad + " killed or failed (6 h)"].filter(Boolean).join(", ");
+  return '<span class="mut' + (bad ? " c-warn" : "") + '" data-tip="Jobs started with job run: ' + t + '">' + (run + q) + (run + q === 1 ? " job" : " jobs") + (q ? " · " + q + " queued" : "") + "</span>";
+}
+function jobTable(h) {
+  const js = (h.jobs || []).slice().reverse().slice(0, 8);
+  if (!js.length) return "";
+  return "<table><tr><th>Job</th><th>State</th><th class=n>Mem / cap</th><th>Owner</th></tr>" + js.map((j) => {
+    const mem = j.state === "run" ? j.mem_now : j.peak_bytes;
+    const tip = j.cmd + (j.why ? "\n" + j.why : "") + "\njob logs " + j.id;
+    return '<tr><td class="cmd" data-tip="' + esc(tip) + '">' + esc(j.project + " · " + j.name) + '</td><td class="' + (JOB_BAD[j.state] || "") + '">' + esc(j.state) +
+      '</td><td class=n>' + fmtB(mem || 0) + " / " + j.mem_gb + 'G</td><td class="mut" data-tip="' + esc(j.owner || "no owner given") + '">' + esc((j.owner || "").slice(0, 8)) + "</td></tr>";
+  }).join("") + "</table>";
+}
+
 function meter(l, pct, val, col, title) {
   return '<div class="meter"' + (title ? ' data-tip="' + esc(title) + '"' : "") + '><span class="l">' + l + '</span><div class="bar"><i style="width:' + Math.min(100, Math.max(0, pct)) + "%;background:" + col + '"></i></div><span class="v">' + val + "</span></div>";
 }
@@ -233,7 +253,7 @@ function renderHosts(s) {
     HOSTMAP[h.name] = h;
     const big = (l, pct, col, tip) => '<div class="m" data-mtip="' + esc(h.name + "|" + l) + '"><div class="mh"><span>' + l + "</span><b" + (col !== "var(--barok)" ? ' style="color:' + col + '"' : "") + ">" + Math.round(pct) + '%</b></div><div class="bar"><i style="width:' + Math.min(100, Math.max(0, pct)) + "%;background:" + col + '"></i></div></div>';
     const thc = h.thrash === "crit" ? "var(--crit)" : h.thrash === "warn" ? "var(--warn)" : "var(--barok)";
-    let x = '<div class="host ' + h.status + (stale ? " stale" : "") + '"><div class="hh">' + OSIC(h) + '<b>' + esc(h.name) + '</b><span class="dot ' + h.status + '"></span>'  + (h.label !== h.name ? '<span class="dim small">' + esc(h.label) + "</span>" : "") + (stale ? '<span class="mut c-warn" data-tip="' + esc(h.error || "No answer from this machine") + '">no data for ' + rel(-h.age).replace(" ago", "") + "</span>" : "") + (h.active_sessions ? '<span class="mut" data-tip="Agent sessions active in the last 15 min">' + h.active_sessions + (h.active_sessions > 1 ? " agents" : " agent") + "</span>" : "") + '</div><div class="ms">';
+    let x = '<div class="host ' + h.status + (stale ? " stale" : "") + '"><div class="hh">' + OSIC(h) + '<b>' + esc(h.name) + '</b><span class="dot ' + h.status + '"></span>'  + (h.label !== h.name ? '<span class="dim small">' + esc(h.label) + "</span>" : "") + (stale ? '<span class="mut c-warn" data-tip="' + esc(h.error || "No answer from this machine") + '">no data for ' + rel(-h.age).replace(" ago", "") + "</span>" : "") + (h.active_sessions ? '<span class="mut" data-tip="Agent sessions active in the last 15 min">' + h.active_sessions + (h.active_sessions > 1 ? " agents" : " agent") + "</span>" : "") + jobPill(h) + '</div><div class="ms">';
     x += big("CPU", h.cpu, barColor(h.cpu, 80, 95), "Load " + h.load[0].toFixed(1) + " on " + h.cores + " cores" + (h.hog && h.hog.cores >= 0.3 ? "\nTop: " + h.hog.project + (h.hog.sub ? " / " + h.hog.sub : "") + ", " + h.hog.cores + " cores" : ""));
     x += big("Memory", h.mem_pct, barColor(h.mem_pct, 88, 95), fmtB(h.mem_total - h.mem_avail) + " of " + fmtB(h.mem_total) + " used");
     x += h.swap_total ? big("Swap", h.swap_pct, thc, fmtB(h.swap_used) + " of " + fmtB(h.swap_total) + " used" + (h.thrash !== "ok" ? "\nThrashing: " + h.thrash_why : "\nNo thrashing (full swap alone is fine)")) : '<div class="m"></div>';
@@ -245,6 +265,7 @@ function renderHosts(s) {
     const reasons = (h.reasons || []).filter((r) => !r.startsWith("swap thrashing"));
     if (h.status !== "ok" && reasons.length) d += '<div class="kv c-' + h.status + '">' + esc(reasons.join("; ")) + "</div>";
     if (h.thrash && h.thrash !== "ok" && h.mem_top[0]) { const p = h.mem_top[0]; d += '<div class="kv c-' + h.thrash + '">Swap thrashing: ' + esc(h.thrash_why) + '</div><div class="kv">Biggest: ' + esc(p.project) + " pid " + p.pid + " · " + fmtB(p.rss + (p.swap || 0)) + ' <code class="fix" data-tip="Click to copy">' + esc(h.kill_prefix + "kill " + p.pid) + "</code></div>"; }
+    d += jobTable(h);
     d += "<table><tr><th class=n>CPU</th><th class=n>Mem</th><th>Project</th><th>Command</th></tr>" + h.procs.slice(0, 8).map((p) => "<tr><td class=n>" + Math.round(p.cpu) + "%</td><td class=n>" + fmtB(p.rss) + "</td><td>" + esc(p.project) + '</td><td class="cmd" data-tip="' + esc(p.cmd + "\n" + p.cwd) + '">' + esc(p.cmd) + "</td></tr>").join("") + "</table>";
     if (h.mem_top && h.mem_top.length) d += "<table><tr><th class=n>RAM</th><th class=n>Swap</th><th>Project</th><th>Process</th></tr>" + h.mem_top.slice(0, 5).map((p) => "<tr><td class=n>" + fmtB(p.rss) + "</td><td class=n>" + (p.swap ? fmtB(p.swap) : "") + "</td><td>" + esc(p.project) + '</td><td class="cmd" data-tip="' + esc(p.cmd) + '">' + p.pid + " " + esc(p.comm) + "</td></tr>").join("") + "</table>";
     x += '<details data-host="' + esc(h.name) + '"' + (openHosts.has(h.name) ? " open" : "") + "><summary>Details</summary>" + d + "</details>";
