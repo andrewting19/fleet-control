@@ -27,13 +27,15 @@ SYS = platform.system()
 GB = 2 ** 30
 STATE = Path(os.environ.get("AGENTJOBS_DIR") or (Path.home() / ".agentjobs"))
 SELF = os.path.realpath(__file__)
-MARGIN_GB = float(os.environ.get("AGENTJOBS_MARGIN_GB", "6" if SYS == "Linux" else "4"))
+MARGIN_ENV = os.environ.get("AGENTJOBS_MARGIN_GB")
 CG = Path("/sys/fs/cgroup")
 PARENT = "agentjobs.slice"
 LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
 CONF = Path("/etc/agentjobs.json")
-MAX_PASSES = 8
-POLL = 10
+STARVE_S = 1800  # an older waiter blocks younger jobs only after it has waited this long
+POLL = 3
+GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
+PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 
 
@@ -110,14 +112,51 @@ def cg_int(path):
         return None
 
 
+def cg_anon(group):
+    """Bytes of anon + shmem memory in a cgroup: what the job really holds."""
+    try:
+        st = dict(l.split() for l in (Path(group) / "memory.stat").read_text().splitlines())
+        return int(st.get("anon", 0)) + int(st.get("shmem", 0))
+    except (OSError, ValueError):
+        return 0
+
+
+def margin():
+    """Bytes to keep free for agents and services: 8% of RAM, at least 3 GB."""
+    if MARGIN_ENV:
+        return float(MARGIN_ENV) * GB
+    return max(3 * GB, 0.08 * total_ram()) if SYS == "Linux" else 4 * GB
+
+
+def mem_pressure():
+    """Linux memory PSI 'full avg10' in percent (0 elsewhere)."""
+    try:
+        for ln in open("/proc/pressure/memory"):
+            if ln.startswith("full"):
+                return float(ln.split("avg10=")[1].split()[0])
+    except (OSError, IndexError, ValueError):
+        pass
+    return 0.0
+
+
+def reserved(m):
+    """Bytes a running job may still grow by. For GRACE_S after start: its stated peak.
+    Then: 1.5x the peak it has really used (at least 0.5 GB), never more than the stated peak."""
+    stated = int(m["peak_gb"] * GB)
+    if now() - (m.get("started") or now()) > GRACE_S:
+        seen = max(int(m.get("anon_peak") or 0), job_mem(m))
+        stated = min(stated, max(int(0.5 * GB), int(seen * 1.5)))
+    return max(0, stated - job_mem(m))
+
+
 def unit_cgroup(m):
     return CG / PARENT / m["slice"] / (m["unit"] + ".service")
 
 
 def job_mem(m):
-    """Bytes in use now by a running job."""
+    """Bytes in use now by a running job (on Linux: anon + shmem; file cache is free to reclaim)."""
     if SYS == "Linux" and m.get("unit"):
-        return cg_int(unit_cgroup(m) / "memory.current") or 0
+        return cg_anon(unit_cgroup(m))
     if SYS == "Darwin" and m.get("child_pgid"):
         return mac_group_rss(m["child_pgid"])
     return int(m.get("mem_now") or 0)
@@ -199,15 +238,17 @@ def others_unused():
 
 def room(jobs):
     """Bytes a new job may reserve now."""
-    r = available() - MARGIN_GB * GB
+    r = available() - margin()
     if SYS == "Linux":
+        if mem_pressure() > PSI_FULL_MAX:
+            return 0
         lim = cg_int(CG / PARENT / "memory.max")
         if lim:
-            r = min(r, lim - (cg_int(CG / PARENT / "memory.current") or 0))
+            r = min(r, lim - cg_anon(CG / PARENT))
         r -= others_unused()
     for m in jobs:
         if m.get("state") == "run":
-            r -= max(0, int(m["peak_gb"] * GB) - job_mem(m))
+            r -= reserved(m)
     return r
 
 
@@ -276,7 +317,7 @@ def cmd_run(a):
     mem_gb = a.mem_gb or max(2.0, round(a.peak_gb * 1.5, 1))
     if a.peak_gb > mem_gb:
         sys.exit("job run: --peak-gb is more than --mem-gb")
-    lim = (total_ram() - MARGIN_GB * GB) if total_ram() else 0
+    lim = (total_ram() - margin()) if total_ram() else 0
     if SYS == "Linux":
         slim = cg_int(CG / PARENT / "memory.max")
         if not slim:
@@ -313,15 +354,7 @@ def cmd_run(a):
         env.write_text("".join("%s=%s\n" % (k, v) for k, v in os.environ.items()
                                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and "\n" not in v and "\\" not in v and '"' not in v))
         os.chmod(str(env), 0o600)
-        pre = [] if os.geteuid() == 0 else ["sudo", "-n"]
-        sr = pre + ["systemd-run", "--quiet", "--collect", "--unit", m["unit"], "--slice", m["slice"],
-                    "--uid", str(os.getuid()), "--gid", str(os.getgid()),
-                    "-p", "WorkingDirectory=" + cwd, "-p", "EnvironmentFile=" + str(env),
-                    "-p", "MemoryMax=%dM" % int(mem_gb * 1024), "-p", "MemorySwapMax=%dM" % int(a.swap_gb * 1024),
-                    "-p", "OOMScoreAdjust=500", "-p", "Nice=10", "-p", "CPUWeight=20", "-p", "IOWeight=20",
-                    "-p", "StandardOutput=append:" + str(log), "-p", "StandardError=append:" + str(log),
-                    sys.executable, SELF, "_supervise", jid]
-        r = subprocess.run(sr, capture_output=True, text=True)
+        r = systemd_launch(m)
         if r.returncode:
             update(jid, state="failed", error=(r.stderr or r.stdout).strip()[-500:], ended=now())
             sys.exit("job run: systemd-run failed (passwordless sudo needed): " + (r.stderr or r.stdout).strip())
@@ -341,12 +374,68 @@ def cmd_run(a):
         update(jid, sup_pid=pid)
     print(jid)
     print("job %s: %s, peak %g GB, cap %g GB. Watch: job ls / job logs %s / job wait %s" % (jid, project, a.peak_gb, mem_gb, jid, jid), file=sys.stderr)
+    if a.wait:
+        sys.exit(follow(jid))
+
+
+def systemd_launch(m):
+    """Start the supervisor of job m as a transient systemd service in its project slice."""
+    d = STATE / m["id"]
+    log = d / "job.log"
+    pre = [] if os.geteuid() == 0 else ["sudo", "-n"]
+    sr = pre + ["systemd-run", "--quiet", "--collect", "--unit", m["unit"], "--slice", m["slice"],
+                "--uid", str(os.getuid()), "--gid", str(os.getgid()),
+                "-p", "WorkingDirectory=" + m["cwd"], "-p", "EnvironmentFile=" + str(d / "env"),
+                "-p", "MemoryMax=%dM" % int(m["mem_gb"] * 1024), "-p", "MemorySwapMax=%dM" % int(m["swap_gb"] * 1024),
+                "-p", "OOMScoreAdjust=500", "-p", "Nice=10", "-p", "CPUWeight=20", "-p", "IOWeight=20",
+                "-p", "StandardOutput=append:" + str(log), "-p", "StandardError=append:" + str(log),
+                sys.executable, SELF, "_supervise", m["id"]]
+    return subprocess.run(sr, capture_output=True, text=True)
+
+
+def cmd_requeue(a):
+    """Linux: restart the supervisors of queued jobs so that they run the current code. A queued job has not
+    started its command, so this is safe; the job keeps its place (its 'created' time)."""
+    pre = [] if os.geteuid() == 0 else ["sudo", "-n"]
+    for m in all_jobs():
+        if m.get("state") != "queued" or SYS != "Linux" or m.get("user") != (os.environ.get("USER") or ""):
+            continue
+        with Lock():  # hold the lock so the old supervisor cannot admit the job while we swap it
+            if (read(m["id"]) or {}).get("state") != "queued":
+                continue
+            subprocess.run(pre + ["systemctl", "stop", m["unit"] + ".service"], capture_output=True)
+            for _ in range(50):
+                if not unit_active(m["unit"]):
+                    break
+                time.sleep(0.1)
+            r = systemd_launch(m)
+        print("%s %s" % (m["id"], "requeued" if r.returncode == 0 else "FAILED: " + (r.stderr or r.stdout).strip()))
+
+
+def follow(jid):
+    """Print the job's log as it grows; return the job's exit code when it ends (1 if it did not exit cleanly)."""
+    log, pos = STATE / jid / "job.log", 0
+    while True:
+        m = read(jid) or {}
+        try:
+            with open(log, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+                pos += len(chunk)
+            if chunk:
+                sys.stdout.write(chunk.decode("utf-8", "replace"))
+                sys.stdout.flush()
+        except OSError:
+            pass
+        if m.get("state") in ENDED:
+            return m.get("exit") if isinstance(m.get("exit"), int) else 1
+        time.sleep(1)
 
 
 # ---------------------------------------------------------------- supervisor (runs inside the job)
 def admit(jid):
-    """Wait for memory. First come first served; a younger job may pass an older waiter that does not fit,
-    at most MAX_PASSES times, then the younger jobs wait too."""
+    """Wait for memory. A job starts as soon as it fits; it may pass an older waiter that does not fit.
+    When an older waiter has waited STARVE_S, younger jobs wait behind it so that it can start."""
     last = 0
     while True:
         with Lock():
@@ -356,10 +445,8 @@ def admit(jid):
                 return False
             older = [m for m in jobs if m.get("state") == "queued" and m.get("created", 0) < me["created"] and m["id"] != jid]
             r = room(jobs)
-            blocked = any(m.get("passes", 0) >= MAX_PASSES for m in older)
+            blocked = any(now() - m.get("created", now()) > STARVE_S for m in older)
             if r >= me["peak_gb"] * GB and not blocked:
-                for m in older:
-                    update(m["id"], passes=m.get("passes", 0) + 1)
                 update(jid, state="run", started=now())
                 return True
         if now() - last > 600:
@@ -382,7 +469,10 @@ def supervise(jid):
         rc, sig, peak, why = posix_run(m)
     if SYS == "Linux":
         cgd = Path("/proc/self/cgroup").read_text().strip().split("::", 1)[-1]
-        peak = cg_int(CG / cgd.strip("/") / "memory.peak") or peak
+        # memory.peak counts file cache too, so it is too high for --peak-gb; keep it apart, report the anon peak
+        cg_peak = cg_int(CG / cgd.strip("/") / "memory.peak")
+        if cg_peak:
+            update(jid, cg_peak=cg_peak)
         ev = (CG / cgd.strip("/") / "memory.events")
         try:
             evs = dict(l.split() for l in ev.read_text().splitlines())
@@ -411,7 +501,17 @@ def posix_run(m):
     signal.signal(signal.SIGTERM, fwd)
     signal.signal(signal.SIGINT, fwd)
     peak, why, t_last = 0, None, 0
+    mycg = None
+    if SYS == "Linux":
+        mycg = CG / Path("/proc/self/cgroup").read_text().strip().split("::", 1)[-1].strip("/")
     while p.poll() is None:
+        if mycg is not None:
+            a = cg_anon(mycg)
+            if a > peak:
+                peak = a
+            if now() - t_last > 10:
+                update(m["id"], anon_peak=peak, peak_bytes=peak)
+                t_last = now()
         if SYS == "Darwin":
             rss = mac_group_rss(p.pid)
             peak = max(peak, rss)
@@ -588,6 +688,7 @@ def main():
     r.add_argument("--peak-gb", type=float, default=2.0, help="memory the job needs at its peak (admission)")
     r.add_argument("--mem-gb", type=float, help="hard cap; default 1.5x peak, at least 2")
     r.add_argument("--swap-gb", type=float, default=1.0, help="swap the job may use (Linux)")
+    r.add_argument("--wait", action="store_true", help="stay in the foreground: print the log, exit with the job's code")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     l = sp.add_parser("ls")
     l.add_argument("--json", action="store_true")
@@ -605,9 +706,10 @@ def main():
     i.add_argument("--max-gb", type=float)
     sv = sp.add_parser("_supervise")
     sv.add_argument("id")
+    sp.add_parser("_requeue")
     a = ap.parse_args()
     {"run": cmd_run, "ls": cmd_ls, "logs": cmd_logs, "wait": cmd_wait, "stop": cmd_stop, "install": cmd_install,
-     "_supervise": lambda a: supervise(a.id)}[a.sub](a)
+     "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
 
 
 if __name__ == "__main__":
