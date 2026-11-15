@@ -16,9 +16,8 @@ queue, and several of them can push a machine into swap thrashing. Each job here
   - runs at low CPU priority, and is killed before services when memory runs out (oom_score_adj 500),
   - records owner (CODEX_THREAD_ID or --owner), project, command, exit code and peak memory in ~/.agentjobs/ID/.
 Linux jobs go to agentjobs-<project>.slice under agentjobs.slice; 'job install' caps that parent slice, so all
-agent jobs together cannot take the memory of services. Admission also respects the reservations of other job
-tools that list them in /etc/agentjobs.json: {"reservation_dirs": ["/dev/shm/x"]}, one JSON file for each job with
-"state" ("run"), "pid", "peak_gb" and "scopes" (cgroup paths).
+agent jobs together cannot take the memory of services. Only jobs of this tool reserve memory: there is no
+way for another tool to hold room in the queue, because a stale hold from a broken tool blocks every job.
 """
 import argparse, json, os, platform, re, shlex, signal, subprocess, sys, time, uuid
 from pathlib import Path
@@ -31,7 +30,6 @@ MARGIN_ENV = os.environ.get("AGENTJOBS_MARGIN_GB")
 CG = Path("/sys/fs/cgroup")
 PARENT = "agentjobs.slice"
 LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
-CONF = Path("/etc/agentjobs.json")
 STARVE_S = 3600  # after this wait, a queued job holds back the room it needs from younger jobs
 SMALL_GB = 1.0  # a job this small is not held back for an older waiter
 POLL = 3
@@ -318,29 +316,6 @@ def total_ram():
     return 0
 
 
-def reservation_files():
-    try:
-        dirs = json.loads(CONF.read_text()).get("reservation_dirs", [])
-    except (OSError, ValueError, AttributeError):
-        dirs = []
-    return [p for d in dirs if Path(d).is_dir() for p in Path(d).glob("*.json")]
-
-
-def others_unused():
-    """Memory that other job tools have reserved for running jobs but not used yet (Linux only)."""
-    tot = 0
-    for p in reservation_files():
-        try:
-            e = json.loads(p.read_text())
-            if e.get("state") != "run" or not Path("/proc/%s" % e.get("pid")).exists():
-                continue
-            used = sum(cg_int(CG / s.strip("/") / "memory.current") or 0 for s in e.get("scopes", []))
-            tot += max(0, int(float(e.get("peak_gb", 0)) * GB) - used)
-        except (OSError, ValueError, TypeError):
-            pass
-    return tot
-
-
 def room(jobs):
     """Bytes a new job may reserve now."""
     r = available() - margin()
@@ -350,7 +325,6 @@ def room(jobs):
         lim = cg_int(CG / PARENT / "memory.max")
         if lim:
             r = min(r, lim - cg_anon(CG / PARENT))
-        r -= others_unused()
     for m in jobs:
         if m.get("state") == "run":
             r -= reserved(m)
