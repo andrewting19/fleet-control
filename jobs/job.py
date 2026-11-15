@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""job: run a heavy command as a tracked job with a memory cap and memory admission.
+"""job: run a heavy command as a tracked job with memory caps and memory/CPU admission.
 
   job run [--project P] [--name N] [--peak-gb G] [--mem-gb M] [--owner ID] -- COMMAND ARG...
   job ls [--json] [--all]        jobs of this user on this machine
@@ -207,13 +207,35 @@ def cpu_busy(jobs):
     return load1 > 2.5 * n and some > 40 and running >= max(2, n // 4)
 
 
+def mac_cpu_slots():
+    """Keep four logical CPUs for interactive tools and services."""
+    return max(1, (os.cpu_count() or 1) - 4)
+
+
+def mac_cpu_blocked(me, jobs):
+    """Reserve declared CPUs under the admission lock, across all projects.
+    Old supervisors did not reserve CPUs and gave each job at least four math threads.
+    Count those jobs as four until they drain; do not stop or change running work.
+    """
+    if SYS != "Darwin":
+        return False
+    used = sum(m.get("cpus") or 4 for m in jobs if m.get("state") == "run")
+    need = me.get("cpus") or 1
+    if used + need > mac_cpu_slots():
+        return True
+    try:
+        return os.getloadavg()[0] > 2 * (os.cpu_count() or 1)
+    except (OSError, AttributeError):
+        return True  # unknown host load: wait rather than add work
+
+
 def thread_env(m):
     """The job's environment, with a thread count for math libraries that fits the free CPUs at start.
     Without it each numpy/BLAS/OpenMP process starts one thread per core, and N jobs make N x cores threads."""
     env = dict(os.environ)
     auto = env.get("JOB_THREADS_AUTO")  # a value equal to this came from a host default or an outer job, not from the caller
     n = os.cpu_count() or 1
-    t = m.get("cpus")
+    t = (m.get("cpus") or 1) if SYS == "Darwin" else m.get("cpus")
     if not t:
         try:
             load = os.getloadavg()[0]
@@ -223,7 +245,7 @@ def thread_env(m):
     t = str(int(t))
     changed = False
     for k in THREAD_VARS:
-        if m.get("cpus") or k not in env or env[k] == auto:
+        if SYS == "Darwin" or m.get("cpus") or k not in env or env[k] == auto:
             env[k] = t
             changed = True
     if changed:
@@ -392,6 +414,12 @@ def cmd_run(a):
     if not a.cmd:
         sys.exit("job run: give a command after --")
     cmd = a.cmd[1:] if a.cmd[0] == "--" else a.cmd
+    if a.cpus is not None and a.cpus < 1:
+        sys.exit("job run: --cpus must be at least 1")
+    if SYS == "Darwin":
+        a.cpus = a.cpus or 1
+        if a.cpus > mac_cpu_slots():
+            sys.exit("job run: --cpus exceeds this Mac's %d CPU slots; use another host" % mac_cpu_slots())
     cwd = os.path.abspath(a.cwd or os.getcwd())
     STATE.mkdir(parents=True, exist_ok=True)
     name = slug(a.name or os.path.basename(cmd[0]) + "-" + "-".join(slug(x, 12) for x in cmd[1:3]), 30)
@@ -535,7 +563,7 @@ def held_back(me, jobs, r):
 
 
 def admit(jid):
-    """Wait for memory. A job starts as soon as it fits; it may pass an older waiter that does not fit.
+    """Wait for memory and CPU room. A job starts as soon as it fits; it may pass an older waiter that does not fit.
     When an older waiter has waited STARVE_S, its peak is held back from younger jobs (see held_back), so that it
     can start; younger jobs still start in the room that is left over."""
     last = 0
@@ -548,7 +576,7 @@ def admit(jid):
             r = room(jobs)
             held = held_back(me, jobs, r)
             blocked = held > 0 and r >= me["peak_gb"] * GB > r - held
-            busy = cpu_busy(jobs)
+            busy = cpu_busy(jobs) or mac_cpu_blocked(me, jobs)
             if r - held >= me["peak_gb"] * GB and not busy:
                 update(jid, state="run", started=now())
                 return True
@@ -793,7 +821,7 @@ def main():
     r.add_argument("--peak-gb", type=float, help="your guess of the peak memory, for a new kind of job (default 2); "
                    "later runs with the same project and name use the measured peak")
     r.add_argument("--mem-gb", type=float, help="hard cap; default 3x peak, at least 2")
-    r.add_argument("--cpus", type=int, help="threads for math libraries; default fits the free CPUs at start")
+    r.add_argument("--cpus", type=int, help="math threads; on Mac, reserved CPU slots (default 1, host limit cores minus 4)")
     r.add_argument("--swap-gb", type=float, default=1.0, help="swap the job may use (Linux)")
     r.add_argument("--wait", action="store_true", help="stay in the foreground: print the log, exit with the job's code")
     r.add_argument("cmd", nargs=argparse.REMAINDER)

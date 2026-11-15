@@ -96,7 +96,12 @@ MemoryMax in agentjobs-<project>.slice under a capped agentjobs.slice; Windows: 
 and records owner, exit code and peak memory in ~/.agentjobs/. The queue is built for speed without swap thrashing:
 --peak-gb is only a first guess, and later runs with the same project and name use the measured peak; a running job
 reserves only 1.5x what it has used after 2 minutes; no job starts while memory pressure (PSI) is high or the CPUs are
-far over capacity; math libraries get a thread count that fits the free CPUs. On Linux, install it with
+far over capacity. On macOS, jobs share cores minus four CPU slots (at least one), across all projects.
+--cpus reserves slots and sets math threads; the Mac default is one, including when thread environment variables
+were set by the caller. Requests above the host limit fail. Old jobs without --cpus count as four until they end.
+New starts also wait while Mac load exceeds twice the core count. These are admission reservations, not a hard
+CPU cap: a command that creates its own workers must declare their total with --cpus. On other hosts, math
+libraries get a thread count that fits the free CPUs. On Linux, install it with
 'sudo python3 jobs/job.py install --max-gb M'. Fleet Control shows the jobs of each machine and warns when
 a job is killed, with the owner thread. Add the rule to your agents' global AGENTS.md or CLAUDE.md, so that they use it.
 
