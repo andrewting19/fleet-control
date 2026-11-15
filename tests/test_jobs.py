@@ -71,7 +71,7 @@ class Plan(unittest.TestCase):
 
 class Threads(unittest.TestCase):
     def env(self, load, cpus=None, base=None):
-        with mock.patch.dict(os.environ, base or {}, clear=True), mock.patch.object(os, "cpu_count", return_value=20), \
+        with mock.patch.object(job, "SYS", "Linux"), mock.patch.dict(os.environ, base or {}, clear=True), mock.patch.object(os, "cpu_count", return_value=20), \
                 mock.patch.object(os, "getloadavg", return_value=(load, 0, 0)), mock.patch("builtins.print"):
             return job.thread_env({"cpus": cpus})
 
@@ -122,3 +122,63 @@ class HeldBack(unittest.TestCase):
 
     def test_a_recent_waiter_holds_nothing(self):
         self.assertAlmostEqual(self.held(3.0, [(6.0, 8000)]), 0.0)
+
+
+class MacCPUAdmission(unittest.TestCase):
+    def setUp(self):
+        for patch in (mock.patch.object(job, "SYS", "Darwin"),
+                      mock.patch.object(os, "cpu_count", return_value=14),
+                      mock.patch.object(os, "getloadavg", return_value=(5, 5, 5))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_cross_project_burst_reserves_ten_and_queues_six(self):
+        jobs = []
+        for i in range(16):
+            me = {"id": str(i), "cpus": 1, "state": "queued", "project": str(i % 3)}
+            if not job.mac_cpu_blocked(me, jobs):
+                me["state"] = "run"
+            jobs.append(me)
+        self.assertEqual(sum(m["state"] == "run" for m in jobs), 10)
+        self.assertEqual(sum(m["state"] == "queued" for m in jobs), 6)
+        jobs[0]["state"] = "done"
+        self.assertFalse(job.mac_cpu_blocked(jobs[-1], jobs))
+
+    def test_declared_cpu_totals_and_old_jobs_count(self):
+        self.assertTrue(job.mac_cpu_blocked({"cpus": 3}, [{"state": "run", "cpus": 8}]))
+        self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, [{"state": "run", "cpus": None}] * 3))
+        self.assertFalse(job.mac_cpu_blocked({"cpus": 2}, [{"state": "run"}] * 2))
+
+    def test_high_or_unknown_load_waits_even_with_empty_queue(self):
+        with mock.patch.object(os, "getloadavg", return_value=(29, 1, 1)):
+            self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, []))
+        with mock.patch.object(os, "getloadavg", side_effect=OSError):
+            self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, []))
+
+    def test_one_cpu_host_keeps_one_slot(self):
+        with mock.patch.object(os, "cpu_count", return_value=1):
+            self.assertEqual(job.mac_cpu_slots(), 1)
+
+    def test_mac_threads_match_reservation_despite_inherited_values(self):
+        with mock.patch.dict(os.environ, {"OMP_NUM_THREADS": "64", "MKL_NUM_THREADS": "64"}, clear=True):
+            e = job.thread_env({})
+            self.assertTrue(all(e[k] == "1" for k in job.THREAD_VARS))
+            e = job.thread_env({"cpus": 3})
+            self.assertTrue(all(e[k] == "3" for k in job.THREAD_VARS))
+
+    def test_admit_checks_cpu_before_start_even_when_memory_fits(self):
+        me = {"id": "me", "peak_gb": 0.1, "cpus": 1, "state": "queued", "created": 1}
+        running = {"id": "other", "state": "run", "cpus": 10}
+        with mock.patch.object(job, "Lock"), mock.patch.object(job, "all_jobs", side_effect=[
+                [me, running], [dict(me, state="stopped"), running]]), \
+                mock.patch.object(job, "room", return_value=100 * GB), \
+                mock.patch.object(job, "held_back", return_value=0), \
+                mock.patch.object(job.time, "sleep"), mock.patch.object(job, "update") as update:
+            self.assertFalse(job.admit("me"))
+            update.assert_not_called()
+
+    def test_invalid_cpu_request_fails_before_creating_job(self):
+        import argparse
+        for cpus in (0, -1, 11):
+            with self.subTest(cpus=cpus), self.assertRaises(SystemExit):
+                job.cmd_run(argparse.Namespace(cmd=["true"], cpus=cpus))
