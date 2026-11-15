@@ -182,3 +182,14 @@ class MacCPUAdmission(unittest.TestCase):
         for cpus in (0, -1, 11):
             with self.subTest(cpus=cpus), self.assertRaises(SystemExit):
                 job.cmd_run(argparse.Namespace(cmd=["true"], cpus=cpus))
+class StartFailure(unittest.TestCase):
+    def test_a_command_that_cannot_start_ends_failed(self):
+        jid = "startfail"
+        (job.STATE / jid).mkdir(parents=True, exist_ok=True)
+        job.write({"id": jid, "state": "wait", "cmd": ["/no/such/program"], "cwd": "/", "peak_gb": 0.1, "mem_gb": 1,
+                   "created": 0})
+        with mock.patch.object(job, "admit", return_value=True), mock.patch.object(job, "SYS", "Darwin"):
+            job.supervise(jid)
+        m = job.read(jid)
+        self.assertEqual((m["state"], m["exit"]), ("failed", 127))
+        self.assertIn("/no/such/program", m["error"])
