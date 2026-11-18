@@ -57,9 +57,22 @@ def view(store, now):
     out = []
     for a in store.accounts:
         v = dict(a)
+        if a["weekly_used"] is None or not a["weekly_reset"]:
+            # No quota report now (signed out, or the provider gave no data). Use the last known sample, so that the
+            # account stays in the pool graph. Each reset that has passed since then puts the use back to 0.
+            last = max((x for x in store.acct_hist if x[2] == a["id"] and x[3] is not None and x[4]),
+                       key=lambda x: x[0], default=None)
+            if last:
+                used, reset = last[3], last[4]
+                while reset <= now:
+                    used, reset = 0, reset + WEEK
+                v.update(weekly_used=used, weekly_reset=reset, quota_stale=int(last[0]))
+                a = v
         used, reset = a["weekly_used"], a["weekly_reset"]
         if used is not None and reset:
             rate, src = _rate(store.acct_hist, a, now)
+            if v.get("quota_stale"):
+                rate, src = 0.0, "no quota data"
             v["rate"], v["rate_src"] = rate, src
             v["eta"] = now if used >= 100 else (now + (100 - used) / rate * 3600 if rate and rate > 0.01 else None)
             v["runs_out_before_reset"] = bool(v["eta"] and v["eta"] < reset and used < 100)

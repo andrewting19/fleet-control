@@ -101,6 +101,20 @@ class AccountsTest(unittest.TestCase):
 
 
 class SourcesTest(unittest.TestCase):
+    def test_account_without_quota_stays_in_pool(self):
+        now = time.time()
+
+        class Store:
+            accounts = [accounts.normalize({"provider": "openai", "id": "a", "status": "signed_out"}, "s"),
+                        accounts.normalize({"provider": "openai", "id": "b", "weekly_used": 10, "weekly_reset": now + 86400}, "s")]
+            acct_hist = [[int(now - 7200), "openai", "a", 40, now + 3 * 86400], [int(now - 7200), "openai", "b", 9, now + 86400]]
+
+        av = accounts.view(Store, now)
+        self.assertEqual((av[0]["weekly_used"], av[0]["rate"], av[0]["status"]), (40, 0.0, "signed_out"))
+        p = accounts.pools(av, {"openai": {}}, now)["openai"]
+        self.assertEqual(sorted(p["bands"]), ["a", "b"])
+        self.assertAlmostEqual(p["left_now"], (60 + 90) / 2, places=1)
+
     def test_command_source(self):
         out = json.dumps({"accounts": [{"provider": "anthropic", "id": "a", "weekly_used": 10}]})
         src = CommandSource({"command": [sys.executable, "-c", "print(%r)" % out]}, {}, None)
