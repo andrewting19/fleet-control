@@ -33,6 +33,7 @@ LOCK = "/dev/shm/agentjobs.lock" if SYS == "Linux" else str(STATE / ".lock")
 STARVE_S = 3600  # after this wait, a queued job holds back the room it needs from younger jobs
 SMALL_GB = 1.0  # a job this small is not held back for an older waiter
 POLL = 3
+LOCK_STALE_S = 60  # the admission lock is held for milliseconds; after this long its holder is paused
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
 ENDED = ("done", "failed", "killed", "stopped", "lost")
@@ -73,6 +74,48 @@ def update(jid, **kw):
     return m
 
 
+def lock_gen():
+    """The newest lock file: LOCK itself (0) or LOCK.N."""
+    d, base = os.path.split(LOCK)
+    try:
+        return max([0] + [int(n[len(base) + 1:]) for n in os.listdir(d) if n.startswith(base + ".") and n[len(base) + 1:].isdigit()])
+    except OSError:
+        return 0
+
+
+def posix_lock():
+    """Take the admission lock. The lock is held for milliseconds. If its holder does not release it for
+    LOCK_STALE_S (a supervisor that a cgroup freeze or SIGSTOP paused while it held the lock), all waiters move
+    to a new lock file. Without this, one paused job stops the queue of every project on the host."""
+    import fcntl
+    t0 = time.time()
+    while True:
+        gen = lock_gen()
+        path = LOCK if gen == 0 else "%s.%d" % (LOCK, gen)
+        f = open(path, "a+")
+        try:
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if lock_gen() == gen:
+                    return f
+                break  # a newer lock file exists: use it
+            except OSError:
+                if lock_gen() != gen:
+                    break
+                if time.time() - t0 > LOCK_STALE_S:
+                    print("[job] the admission lock was held for %d s by a paused process; the queue moves to a new lock"
+                          % LOCK_STALE_S, file=sys.stderr, flush=True)
+                    open("%s.%d" % (LOCK, gen + 1), "a+").close()
+                    t0 = time.time()
+                    break
+                time.sleep(0.05)
+        f.close()
+
+
 class Lock:
     def __enter__(self):
         self.f = open(LOCK, "a+")
@@ -89,8 +132,8 @@ class Lock:
                 except OSError:
                     time.sleep(0.2)
         else:
-            import fcntl
-            fcntl.flock(self.f, fcntl.LOCK_EX)
+            self.f.close()
+            self.f = posix_lock()
         return self
 
     def __exit__(self, *a):
@@ -381,8 +424,10 @@ def all_jobs():
 
 
 def unit_active(unit):
-    r = subprocess.run(["systemctl", "is-active", "--quiet", unit + ".service"])
-    return r.returncode == 0
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", unit + ".service"], timeout=15).returncode == 0
+    except subprocess.SubprocessError:
+        return True  # systemd did not answer: do not call the job lost
 
 
 # ---------------------------------------------------------------- run

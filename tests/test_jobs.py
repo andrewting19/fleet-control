@@ -213,3 +213,29 @@ class StartFailure(unittest.TestCase):
         m = job.read(jid)
         self.assertEqual((m["state"], m["exit"]), ("failed", 127))
         self.assertIn("/no/such/program", m["error"])
+
+
+class StaleLock(unittest.TestCase):
+    """A paused process that holds the admission lock must not stop the queue."""
+
+    @unittest.skipIf(job.SYS == "Windows", "posix lock")
+    def test_waiters_move_to_a_new_lock_when_the_holder_is_paused(self):
+        import fcntl
+        d = tempfile.mkdtemp(prefix="agentjobs-lock-")
+        path = os.path.join(d, "x.lock")
+        with mock.patch.object(job, "LOCK", path), mock.patch.object(job, "LOCK_STALE_S", 0.3):
+            held = open(path, "a+")
+            fcntl.flock(held, fcntl.LOCK_EX)  # the paused holder
+            with mock.patch("builtins.print"):
+                with job.Lock():
+                    self.assertEqual(job.lock_gen(), 1)
+            with job.Lock():  # later waiters use the new file at once
+                pass
+            held.close()
+
+    @unittest.skipIf(job.SYS == "Windows", "posix lock")
+    def test_free_lock_keeps_its_file(self):
+        d = tempfile.mkdtemp(prefix="agentjobs-lock-")
+        with mock.patch.object(job, "LOCK", os.path.join(d, "x.lock")):
+            with job.Lock():
+                self.assertEqual(job.lock_gen(), 0)
