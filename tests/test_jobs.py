@@ -149,11 +149,31 @@ class MacCPUAdmission(unittest.TestCase):
         self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, [{"state": "run", "cpus": None}] * 3))
         self.assertFalse(job.mac_cpu_blocked({"cpus": 2}, [{"state": "run"}] * 2))
 
-    def test_high_or_unknown_load_waits_even_with_empty_queue(self):
-        with mock.patch.object(os, "getloadavg", return_value=(29, 1, 1)):
-            self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, []))
+    def test_load_of_the_mac_is_not_a_gate(self):
+        with mock.patch.object(os, "getloadavg", return_value=(60, 1, 1)):
+            self.assertFalse(job.mac_cpu_blocked({"cpus": 1}, []))
         with mock.patch.object(os, "getloadavg", side_effect=OSError):
-            self.assertTrue(job.mac_cpu_blocked({"cpus": 1}, []))
+            self.assertFalse(job.mac_cpu_blocked({"cpus": 1}, []))
+
+    def held(self, age, cores, cpus=4):
+        m = {"state": "run", "cpus": cpus, "child_pgid": 1, "started": 1000 - age}
+        with mock.patch.object(job, "now", return_value=1000), mock.patch.object(job, "mac_group_cpu", return_value=cores):
+            return job.mac_cpu_reserved(m)
+
+    def test_new_job_holds_its_declared_cpus(self):
+        self.assertEqual(self.held(age=30, cores=0.0), 4)
+
+    def test_old_idle_job_frees_its_slots(self):
+        self.assertAlmostEqual(self.held(age=600, cores=0.0), 0.1)
+
+    def test_old_busy_job_never_holds_more_than_declared(self):
+        self.assertEqual(self.held(age=600, cores=6.0), 4)
+        self.assertAlmostEqual(self.held(age=600, cores=1.0), 1.5)
+
+    def test_idle_services_do_not_fill_the_slots(self):
+        idle = [{"state": "run", "cpus": 1, "child_pgid": i + 1, "started": 1} for i in range(30)]
+        with mock.patch.object(job, "now", return_value=1000), mock.patch.object(job, "mac_group_cpu", return_value=0.0):
+            self.assertFalse(job.mac_cpu_blocked({"cpus": 4}, idle))
 
     def test_one_cpu_host_keeps_one_slot(self):
         with mock.patch.object(os, "cpu_count", return_value=1):

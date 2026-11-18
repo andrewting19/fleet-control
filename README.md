@@ -99,7 +99,8 @@ reserves only 1.5x what it has used after 2 minutes; no job starts while memory 
 far over capacity. On macOS, jobs share cores minus four CPU slots (at least one), across all projects.
 --cpus reserves slots and sets math threads; the Mac default is one, including when thread environment variables
 were set by the caller. Requests above the host limit fail. Old jobs without --cpus count as four until they end.
-New starts also wait while Mac load exceeds twice the core count. These are admission reservations, not a hard
+After 2 minutes a Mac job holds only 1.5x the cores it really uses, so a job that sleeps or waits on the network
+frees its slot. The load of the Mac itself is not a gate. These are admission reservations, not a hard
 CPU cap: a command that creates its own workers must declare their total with --cpus. On other hosts, math
 libraries get a thread count that fits the free CPUs. On Linux, install it with
 'sudo python3 jobs/job.py install --max-gb M'. Fleet Control shows the jobs of each machine and warns when

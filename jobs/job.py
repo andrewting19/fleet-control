@@ -210,21 +210,33 @@ def mac_cpu_slots():
     return max(1, (os.cpu_count() or 1) - 4)
 
 
+def mac_group_cpu(pgid):
+    """Cores in use now by a process group (ps %cpu, a short average)."""
+    try:
+        out = subprocess.run(["ps", "-o", "%cpu=", "-g", str(pgid)], capture_output=True, text=True, timeout=10).stdout
+        return sum(float(x) for x in out.split()) / 100
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def mac_cpu_reserved(m):
+    """CPU slots a running Mac job holds. For GRACE_S after start: the CPUs it declared (old jobs: four).
+    Then: 1.5x the cores it really uses (at least 0.1), never more than it declared. A job that waits on the
+    network or sleeps as a service then holds almost no slot."""
+    declared = m.get("cpus") or 4
+    if m.get("child_pgid") and now() - (m.get("started") or now()) > GRACE_S:
+        return min(declared, max(0.1, 1.5 * mac_group_cpu(m["child_pgid"])))
+    return declared
+
+
 def mac_cpu_blocked(me, jobs):
-    """Reserve declared CPUs under the admission lock, across all projects.
-    Old supervisors did not reserve CPUs and gave each job at least four math threads.
-    Count those jobs as four until they drain; do not stop or change running work.
-    """
+    """Reserve CPU slots under the admission lock, across all projects. Only CPU that jobs use can block a job.
+    The load of the Mac is not a gate: apps, a VM and agent chats keep it above twice the core count for hours,
+    and jobs of 0.2 GB then waited up to 6 hours for CPUs that no job used."""
     if SYS != "Darwin":
         return False
-    used = sum(m.get("cpus") or 4 for m in jobs if m.get("state") == "run")
-    need = me.get("cpus") or 1
-    if used + need > mac_cpu_slots():
-        return True
-    try:
-        return os.getloadavg()[0] > 2 * (os.cpu_count() or 1)
-    except (OSError, AttributeError):
-        return True  # unknown host load: wait rather than add work
+    used = sum(mac_cpu_reserved(m) for m in jobs if m.get("state") == "run")
+    return used + (me.get("cpus") or 1) > mac_cpu_slots()
 
 
 def thread_env(m):
@@ -524,6 +536,13 @@ def follow(jid):
 
 
 # ---------------------------------------------------------------- supervisor (runs inside the job)
+def self_mtime():
+    try:
+        return os.stat(SELF).st_mtime
+    except OSError:
+        return 0
+
+
 def held_back(me, jobs, r):
     """Bytes of the room r that job 'me' must leave for an older waiter. Only the oldest waiter that has waited
     STARVE_S holds room back, and only if it can fit when all running jobs have ended (if not, the hold helps
@@ -541,7 +560,11 @@ def admit(jid):
     When an older waiter has waited STARVE_S, its peak is held back from younger jobs (see held_back), so that it
     can start; younger jobs still start in the room that is left over."""
     last = 0
+    code = self_mtime()
     while True:
+        if SYS == "Darwin" and self_mtime() != code:  # the tool was updated: a waiting job loads the new rules
+            print("[job] the job tool changed; this waiting job restarts its supervisor", flush=True)
+            os.execv(sys.executable, [sys.executable, SELF, "_supervise", jid])
         with Lock():
             jobs = all_jobs()
             me = next(m for m in jobs if m["id"] == jid)
