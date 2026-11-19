@@ -36,6 +36,7 @@ POLL = 3
 LOCK_STALE_S = 60  # the admission lock is held for milliseconds; after this long its holder is paused
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
+HISTORY_X = 1.1  # a known kind of job reserves this times its largest recent peak (1.25 left 26% of that room unused)
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
                "VECLIB_MAXIMUM_THREADS", "NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "RAYON_NUM_THREADS")
@@ -199,7 +200,7 @@ def name_key(name):
 
 
 def history_peak(project, name, jobs=None):
-    """(GB, runs): the peak to expect for this kind of job: 1.25x the largest of its last 5 good runs.
+    """(GB, runs): the peak to expect for this kind of job: HISTORY_X times the largest of its last 5 good runs.
     If the newest ended run was killed at its cap, the real peak is unknown: use 1.5x that cap.
     Returns (None, 0) when there is no history."""
     key, got = name_key(name), []
@@ -217,7 +218,7 @@ def history_peak(project, name, jobs=None):
             break
     if not got:
         return None, 0
-    return max(0.25, round(max(got) * 1.25, 2)), len(got)
+    return max(0.25, round(max(got) * HISTORY_X, 2)), len(got)
 
 
 def plan(project, name, given, mem_given, jobs=None):
@@ -854,6 +855,48 @@ def cmd_install(a):
     print("agentjobs.slice: MemoryMax=%dG of %.0f GB RAM; %s installed" % (mx, tot, dst))
 
 
+def cmd_room(a):
+    """One JSON line: the room for a new job on this host now."""
+    jobs = all_jobs()
+    n = os.cpu_count() or 1
+    try:
+        load = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        load = 0.0
+    q = [m for m in jobs if m.get("state") == "queued"]
+    print(json.dumps({"host": platform.node(), "room_gb": round(room(jobs) / GB, 1), "cores": n, "load": round(load, 1),
+                      "running": sum(1 for m in jobs if m.get("state") == "run"), "queued": len(q),
+                      "oldest_wait_min": round((now() - min(m["created"] for m in q)) / 60) if q else 0}))
+
+
+def cmd_where(a):
+    """Show the room on each job host, most room first. Hosts: AGENTJOBS_HOSTS or the file <state>/hosts."""
+    from concurrent.futures import ThreadPoolExecutor
+    f = STATE / "hosts"
+    hosts = (os.environ.get("AGENTJOBS_HOSTS") or (f.read_text() if f.exists() else "")).split()
+    if not hosts:
+        sys.exit("job where: no hosts. Put host names in %s (one per line) or set AGENTJOBS_HOSTS." % f)
+
+    def ask(h):
+        try:
+            out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", h, "job room"],
+                                 capture_output=True, text=True, timeout=20).stdout
+            return h, json.loads(out.strip().splitlines()[-1])
+        except Exception:
+            return h, None
+    with ThreadPoolExecutor(len(hosts)) as ex:
+        rows = list(ex.map(ask, hosts))
+    if a.json:
+        print(json.dumps({h: r for h, r in rows}))
+        return
+    print("%-12s %8s %7s %7s %6s %10s" % ("HOST", "ROOM", "QUEUED", "RUNNING", "CORES", "FREE CORES"))
+    for h, r in sorted(rows, key=lambda x: -(x[1] or {}).get("room_gb", -1e9)):
+        if not r:
+            print("%-12s %8s" % (h, "no answer"))
+            continue
+        print("%-12s %7.1fG %7d %7d %6d %10.0f" % (h, r["room_gb"], r["queued"], r["running"], r["cores"], max(0, r["cores"] - r["load"])))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="job", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="sub", required=True)
@@ -886,9 +929,12 @@ def main():
     sv = sp.add_parser("_supervise")
     sv.add_argument("id")
     sp.add_parser("_requeue")
+    sp.add_parser("room")
+    wh = sp.add_parser("where")
+    wh.add_argument("--json", action="store_true")
     a = ap.parse_args()
     {"run": cmd_run, "ls": cmd_ls, "logs": cmd_logs, "wait": cmd_wait, "stop": cmd_stop, "install": cmd_install,
-     "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
+     "room": cmd_room, "where": cmd_where, "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
 
 
 if __name__ == "__main__":

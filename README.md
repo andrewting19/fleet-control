@@ -90,6 +90,7 @@ Linux, macOS and Windows):
 
     ssh HOST job run --project P --owner "$CODEX_THREAD_ID" --peak-gb 4 -- python train.py
     job ls | job logs ID | job wait ID --timeout 600 | job stop ID
+    job where     # room, queue and free cores on each host in ~/.agentjobs/hosts, most room first
 
 Each job outlives the shell, waits until the machine has its peak memory free, stops at --mem-gb (Linux: cgroup
 MemoryMax in agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog),

@@ -47,7 +47,7 @@ class Plan(unittest.TestCase):
 
     def test_history_wins_over_a_guess_that_is_too_high(self):
         peak, mem, note = job.plan("p", "eval_2026_07", 4.0, None, jobs=[rec(peak=0.4), rec(peak=0.3)])
-        self.assertEqual(peak, 0.5)
+        self.assertEqual(peak, 0.44)
         self.assertEqual(mem, 6.0)  # still 1.5x the caller's guess: this run may be bigger
         self.assertIn("2 earlier runs", note)
 
@@ -58,14 +58,14 @@ class Plan(unittest.TestCase):
 
     def test_a_good_run_after_a_kill_replaces_the_kill(self):
         jobs = [rec(peak=1.0), rec(state="killed", cap=6.0, why="over its memory cap"), rec(peak=6.4)]
-        self.assertEqual(job.plan("p", "eval_2026_07", 4.0, None, jobs=jobs)[0], 8.0)
+        self.assertEqual(job.plan("p", "eval_2026_07", 4.0, None, jobs=jobs)[0], 7.04)
 
     def test_other_projects_names_and_short_runs_do_not_count(self):
         jobs = [rec(project="q", peak=9), rec(name="train_2026_01", peak=9), rec(peak=9, ran=3), rec(state="failed", peak=9)]
         self.assertEqual(job.plan("p", "eval_2026_07", 1.0, None, jobs=jobs), (1.0, 3.0, ""))
 
     def test_explicit_cap_is_kept_but_never_below_the_learned_peak(self):
-        self.assertEqual(job.plan("p", "eval_2026_07", 1.0, 3.0, jobs=[rec(peak=4.0)])[:2], (5.0, 7.5))
+        self.assertEqual(job.plan("p", "eval_2026_07", 1.0, 3.0, jobs=[rec(peak=4.0)])[:2], (4.4, 6.6))
         self.assertEqual(job.plan("p", "new", 1.0, 3.0, jobs=[])[:2], (1.0, 3.0))
 
 
