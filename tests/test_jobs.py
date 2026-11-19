@@ -39,6 +39,15 @@ class Reserved(unittest.TestCase):
 
 
 class Plan(unittest.TestCase):
+    def test_room_holds_the_largest_regrowth_and_a_share_of_the_others(self):
+        t = job.now()
+        jobs = [{"state": "run", "started": t - 3600, "r": 12}, {"state": "run", "started": t - 3600, "r": 8},
+                {"state": "run", "started": t - 10, "r": 4}, {"state": "queued", "r": 99}]
+        with mock.patch.object(job, "available", return_value=40 * GB), mock.patch.object(job, "margin", return_value=5 * GB), \
+                mock.patch.object(job, "mem_pressure", return_value=0), mock.patch.object(job, "cg_int", return_value=None), \
+                mock.patch.object(job, "reserved", side_effect=lambda m: m["r"] * GB):
+            self.assertAlmostEqual(job.room(jobs) / GB, 40 - 5 - 4 - 12 - 0.25 * 8)
+
     def test_no_history_uses_the_guess_and_a_loose_cap(self):
         self.assertEqual(job.plan("p", "new_job", 4.0, None, jobs=[]), (4.0, 12.0, ""))
 

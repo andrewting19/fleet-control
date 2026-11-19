@@ -37,6 +37,7 @@ LOCK_STALE_S = 60  # the admission lock is held for milliseconds; after this lon
 GRACE_S = 120  # a new job keeps its full stated peak for this long, then its reservation follows what it uses
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
 HISTORY_X = 1.1  # a known kind of job reserves this times its largest recent peak (1.25 left 26% of that room unused)
+REGROW_X = 0.25  # share of the possible regrowth that is held for running jobs other than the one with the most
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
                "VECLIB_MAXIMUM_THREADS", "NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "RAYON_NUM_THREADS")
@@ -373,7 +374,10 @@ def total_ram():
 
 
 def room(jobs):
-    """Bytes a new job may reserve now."""
+    """Bytes a new job may reserve now. A job in its first GRACE_S holds its full stated peak. An older job is
+    below its own earlier peak most of the time, and jobs do not all go back to their peaks together: the room
+    holds the largest such regrowth in full and REGROW_X of the others. The slice cap, the margin and the memory
+    pressure check cover the rare case where more of them grow at the same time."""
     r = available() - margin()
     if SYS == "Linux":
         if mem_pressure() > PSI_FULL_MAX:
@@ -381,10 +385,15 @@ def room(jobs):
         lim = cg_int(CG / PARENT / "memory.max")
         if lim:
             r = min(r, lim - cg_anon(CG / PARENT))
+    regrow = []
     for m in jobs:
         if m.get("state") == "run":
-            r -= reserved(m)
-    return r
+            if now() - (m.get("started") or now()) > GRACE_S:
+                regrow.append(reserved(m))
+            else:
+                r -= reserved(m)
+    regrow.sort(reverse=True)
+    return r - sum(regrow[:1]) - REGROW_X * sum(regrow[1:])
 
 
 # ---------------------------------------------------------------- process checks
