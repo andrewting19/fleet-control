@@ -38,6 +38,18 @@ GRACE_S = 120  # a new job keeps its full stated peak for this long, then its re
 PSI_FULL_MAX = 5.0  # no new job starts while memory pressure (full avg10, percent) is above this
 HISTORY_X = 1.1  # a known kind of job reserves this times its largest recent peak (1.25 left 26% of that room unused)
 REGROW_X = 0.25  # share of the possible regrowth that is held for running jobs other than the one with the most
+# Linux: no prediction. A job starts when the host has real free memory. A watcher pauses a job when memory is short.
+START_GB = 2.0  # free memory (after the margin) that a new job needs, or half of its --peak-gb hint if that is more
+YOUNG_S = 60  # a job this young has not grown yet: half of its hint still counts as used
+LOW_FRAC = 0.05  # the watcher acts when MemAvailable is below this share of RAM (at least 2 GB) ...
+PSI_ACT = 5.0  # ... or when memory pressure (full avg10, percent) is above this, for HOT_S
+HOT_S = 6
+ACT_GAP_S = 15  # time between two watcher actions, to see the effect of the first
+CALM_S = 30  # memory must be calm this long before a paused job resumes
+IMMUNE_S = 300  # a resumed job is not paused again for this long, if another job can be
+SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
+SWAP_KEEP = 2.0  # GB of swap that a pause never uses
+FULL_EXIT = 75  # exit code of 'job run' when the host is full
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
                "VECLIB_MAXIMUM_THREADS", "NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "RAYON_NUM_THREADS")
@@ -198,6 +210,182 @@ def reserved(m):
 def name_key(name):
     """Jobs whose names differ only in digits (dates, shard numbers) are the same kind of job."""
     return re.sub(r"\d+", "#", name or "")
+
+
+# ---------------------------------------------------------------- Linux: start on real free memory, pause on real pressure
+def priv(argv, **kw):
+    return subprocess.run(([] if os.geteuid() == 0 else ["sudo", "-n"]) + argv, capture_output=True, text=True, **kw)
+
+
+def cg_write(path, value):
+    """Write to a cgroup file as root. True on success."""
+    try:
+        if os.geteuid() == 0:
+            Path(path).write_text(str(value))
+            return True
+    except OSError:
+        return False
+    try:  # one write() call; 'tee' would try again without end when memory.reclaim returns EAGAIN
+        return subprocess.run(["sudo", "-n", "sh", "-c", 'echo "$1" > "$2"', "sh", str(value), str(path)],
+                              capture_output=True, text=True, timeout=120).returncode == 0
+    except subprocess.SubprocessError:
+        return False
+
+
+def swap_free():
+    try:
+        for ln in open("/proc/meminfo"):
+            if ln.startswith("SwapFree:"):
+                return int(ln.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
+def is_paused(m):
+    """True when the watcher paused this running job. The cgroup is the truth: a supervisor that was frozen in the
+    middle of a record update can write an old record back."""
+    if m.get("state") != "run" or not m.get("unit"):
+        return False
+    try:
+        return (unit_cgroup(m) / "cgroup.freeze").read_text().strip() == "1"
+    except OSError:
+        return False
+
+
+def free_now(jobs, skip=None):
+    """Bytes free for a new job now: MemAvailable minus the margin, inside the slice cap, minus half of the hint of
+    each job that started in the last YOUNG_S (it has not grown yet)."""
+    r = available() - margin()
+    lim = cg_int(CG / PARENT / "memory.max")
+    if lim:
+        r = min(r, lim - cg_anon(CG / PARENT))
+    for m in jobs:
+        if m.get("state") == "run" and m.get("id") != skip and now() - (m.get("started") or 0) < YOUNG_S:
+            r -= max(0, (m.get("peak_given") or START_GB) * GB / 2 - job_mem(m))
+    return r
+
+
+def door(me, jobs):
+    """(open, reason). The door for a new job on Linux. It looks only at measured values."""
+    paused = [m for m in jobs if is_paused(m)]
+    if paused:
+        return False, "%d job%s paused here because memory is short" % (len(paused), " is" if len(paused) == 1 else "s are")
+    if mem_pressure() > PSI_FULL_MAX:
+        return False, "memory pressure is high"
+    need = max(START_GB, (me.get("peak_given") or 0) / 2) * GB
+    free = free_now(jobs, me.get("id"))
+    if free < need:
+        return False, "%.1f GB is free, this job needs %.1f GB to start" % (max(0, free) / GB, need / GB)
+    return True, ""
+
+
+def watch_log(m, text):
+    try:
+        with open(str(STATE / m["id"] / "job.log"), "a") as f:
+            f.write("[job] %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except OSError:
+        pass
+    print("%s %s %s/%s: %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), m["id"], m.get("project"), m.get("name"), text), flush=True)
+
+
+def victims(jobs):
+    """Jobs that can be paused, best choice first: the project that uses the most job memory first, and in a project
+    the youngest job first. Jobs below SMALL_VICTIM and jobs with --no-pause are never chosen. A job that resumed
+    less than IMMUNE_S ago comes after all others."""
+    c = [m for m in jobs if m.get("state") == "run" and not is_paused(m) and not m.get("no_pause")]
+    for m in c:
+        m["_mem"] = job_mem(m)
+    c = [m for m in c if m["_mem"] >= SMALL_VICTIM * GB]
+    use = {}
+    for m in c:
+        use[m.get("project")] = use.get(m.get("project"), 0) + m["_mem"]
+    return sorted(c, key=lambda m: (now() - (m.get("resumed") or 0) <= IMMUNE_S, -use[m.get("project")], -(m.get("started") or 0)))
+
+
+def kill_job(m, why):
+    update(m["id"], state="killed", why=why, watch_why=why, ended=now(), signal=9, peak_bytes=max(m.get("peak_bytes") or 0, m.get("_mem") or 0))
+    watch_log(m, "killed: " + why)
+    cg_write(unit_cgroup(m) / "cgroup.freeze", 0)
+    priv(["systemctl", "kill", "--signal=SIGKILL", m["unit"] + ".service"])
+
+
+def relieve(jobs):
+    """Memory is short now. Pause the first job of victims() and move as much of its memory to swap as the swap can
+    take (SWAP_KEEP stays free). A paused job stops growing and stops using its memory, so a part is enough.
+    Kill only when a pause cannot help: swap is full, or the job is the only one here and it filled the host
+    again after 2 pauses. A killed job is never started again."""
+    order = victims(jobs)
+    if not order:
+        return None
+    m = order[0]
+    mem, cg = m["_mem"], unit_cgroup(m)
+    space = swap_free() - SWAP_KEEP * GB
+    if space < 1 * GB:
+        kill_job(m, "memory was short and swap is full, so no job could be paused. This job (%.1f GB) was the newest "
+                    "of the project that used the most memory. It was not started again. Use a host with room "
+                    "('job where')." % (mem / GB))
+        return "kill"
+    if len(order) == 1 and (m.get("pauses") or 0) >= 2:
+        kill_job(m, "it is the only job here and it filled the memory 3 times (%.1f GB now). It was not started "
+                    "again. Use a host with more memory or make the job smaller." % (mem / GB))
+        return "kill"
+    with Lock():  # a supervisor that updates its record holds no lock while we freeze it
+        if not cg_write(cg / "cgroup.freeze", 1):
+            return None
+        update(m["id"], paused=now(), pauses=(m.get("pauses") or 0) + 1)
+    watch_log(m, "paused: host memory is short (this job holds %.1f GB). It resumes automatically." % (mem / GB))
+    cg_write(cg / "memory.swap.max", "max")
+    cg_write(cg / "memory.reclaim", "%d" % min(mem, space))  # a partial result is fine
+    return "pause"
+
+
+def resume_one(jobs):
+    """Resume the oldest paused job if its swapped memory fits in the free memory now."""
+    paused = sorted((m for m in jobs if is_paused(m)), key=lambda m: m.get("started") or 0)
+    if not paused:
+        return False
+    m = paused[0]
+    cg = unit_cgroup(m)
+    back = (cg_int(cg / "memory.swap.current") or 0) + START_GB * GB
+    if available() - margin() < back:
+        return False
+    cg_write(cg / "cgroup.freeze", 0)
+    cg_write(cg / "memory.swap.max", "%d" % int((m.get("swap_gb") or 1) * GB))
+    t = m.get("paused") or now()
+    update(m["id"], paused=None, resumed=now(), paused_s=(m.get("paused_s") or 0) + now() - t)
+    watch_log(m, "resumed after %.0f s" % (now() - t))
+    return True
+
+
+def cmd_watch(a):
+    """Linux: the memory watcher (one per user, started by 'job install'). It reads real memory values every 2 s."""
+    low = max(2 * GB, LOW_FRAC * total_ram())
+    hot = calm = None
+    acted = 0
+    print("watcher: act below %.1f GB available or above %g%% memory pressure" % (low / GB, PSI_ACT), flush=True)
+    while True:
+        try:
+            av, psi = available(), mem_pressure()
+            lim = cg_int(CG / PARENT / "memory.max")
+            near = bool(lim and cg_anon(CG / PARENT) > 0.9 * lim)
+            if av < low or psi > PSI_ACT or near:
+                hot, calm = hot or now(), None
+                urgent = av < low / 2 or near  # near: the jobs are close to the slice cap, where the kernel kills
+                if now() - hot >= (0 if urgent else HOT_S) and now() - acted >= (4 if urgent else ACT_GAP_S):
+                    if relieve(all_jobs()):
+                        acted = now()
+            else:
+                hot = None
+                if av - margin() > 0 and psi < 1:
+                    calm = calm or now()
+                    if now() - calm >= CALM_S and now() - acted >= ACT_GAP_S and resume_one(all_jobs()):
+                        acted = now()
+                else:
+                    calm = None
+        except Exception as e:  # the watcher must not stop
+            print("watcher error: %r" % e, flush=True)
+        time.sleep(2)
 
 
 def history_peak(project, name, jobs=None):
@@ -467,10 +655,13 @@ def cmd_run(a):
     jid = time.strftime("%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
     project = slug(a.project or guess_project(cwd), 30).lower()
     given = a.peak_gb
-    a.peak_gb, mem_gb, note = plan(project, name, given, a.mem_gb)
+    if SYS == "Linux":  # no prediction: the hint is used only at the door; the cap is the slice cap unless given
+        a.peak_gb, mem_gb, note = float(given or START_GB), float(a.mem_gb or 0), ""
+    else:
+        a.peak_gb, mem_gb, note = plan(project, name, given, a.mem_gb)
     if note:
         print("job run: " + note + (" (you gave %g)" % given if given else ""), file=sys.stderr)
-    if a.peak_gb > mem_gb:
+    if mem_gb and a.peak_gb > mem_gb:
         sys.exit("job run: --peak-gb is more than --mem-gb")
     lim = (total_ram() - margin()) if total_ram() else 0
     if SYS == "Linux":
@@ -489,16 +680,28 @@ def cmd_run(a):
         if a.peak_gb > lim_gb * 0.9:
             sys.exit("job run: --peak-gb %g is too big for this host. Agent jobs here may use %.0f GB in total. "
                      "Split the job into smaller parts, or run it on a bigger host." % (a.peak_gb, lim_gb))
-        mem_gb = min(mem_gb, round(lim_gb, 1))
-    fits = room(all_jobs()) / GB
-    if fits < a.peak_gb:
-        print("job run: only %.1f GB is free for jobs now. This job waits until %g GB is free." % (max(0, fits), a.peak_gb), file=sys.stderr)
+        mem_gb = min(mem_gb or lim_gb, round(lim_gb, 1))
+    if SYS == "Linux":
+        mem_gb = mem_gb or round(total_ram() / GB, 1)
+        ok, why = door({"peak_given": given}, all_jobs())
+        if not ok and not a.queue:
+            print("job run: %s is full: %s. The job did NOT start. Use another host ('job where' shows the room on "
+                  "each host), or add --queue to wait here." % (platform.node(), why), file=sys.stderr)
+            sys.exit(FULL_EXIT)
+        if not ok:
+            print("job run: %s. This job waits (--queue)." % why, file=sys.stderr)
+    else:
+        fits = room(all_jobs()) / GB
+        if fits < a.peak_gb:
+            print("job run: only %.1f GB is free for jobs now. This job waits until %g GB is free." % (max(0, fits), a.peak_gb), file=sys.stderr)
     owner = a.owner or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or ""
     d = STATE / jid
     d.mkdir()
     m = {"id": jid, "name": name, "project": project, "owner": owner, "host": platform.node(), "os": SYS, "cmd": cmd,
          "cwd": cwd, "peak_gb": a.peak_gb, "mem_gb": mem_gb, "swap_gb": a.swap_gb, "state": "queued", "created": now(),
          "peak_given": given, "cpus": a.cpus, "user": os.environ.get("USER") or os.environ.get("USERNAME") or "", "version": 1}
+    if a.no_pause:
+        m["no_pause"] = True
     log = d / "job.log"
     log.touch()
     if SYS == "Linux":
@@ -558,9 +761,6 @@ def cmd_requeue(a):
         with Lock():  # hold the lock so the old supervisor cannot admit the job while we swap it
             if (read(m["id"]) or {}).get("state") != "queued":
                 continue
-            pk, mem, note = plan(m.get("project"), m.get("name"), m.get("peak_given") or m["peak_gb"], None)
-            if note and (pk != m["peak_gb"]):
-                m = update(m["id"], peak_given=m.get("peak_given") or m["peak_gb"], peak_gb=pk, mem_gb=max(mem, m["mem_gb"]))
             subprocess.run(pre + ["systemctl", "stop", m["unit"] + ".service"], capture_output=True)
             for _ in range(50):
                 if not unit_active(m["unit"]):
@@ -625,6 +825,22 @@ def admit(jid):
             me = next(m for m in jobs if m["id"] == jid)
             if me.get("state") == "stopped":
                 return False
+            if SYS == "Linux":
+                ok, why = door(me, jobs)
+                if ok:
+                    update(jid, state="run", started=now())
+                    return True
+        if SYS == "Linux":
+            if now() - last > 600:
+                print("[job] waiting: " + why, flush=True)
+                last = now()
+            time.sleep(POLL)
+            continue
+        with Lock():
+            jobs = all_jobs()
+            me = next(m for m in jobs if m["id"] == jid)
+            if me.get("state") == "stopped":
+                return False
             r = room(jobs)
             held = held_back(me, jobs, r)
             blocked = held > 0 and r >= me["peak_gb"] * GB > r - held
@@ -666,6 +882,7 @@ def supervise(jid):
                 why = why or "over its memory cap (%g GB): the kernel killed it" % m["mem_gb"]
         except (OSError, ValueError):
             pass
+        why = (read(jid) or {}).get("watch_why") or why
     st = "done" if rc == 0 else ("killed" if why or sig in (9,) else "failed")
     if (read(jid) or {}).get("state") == "stopped":
         st = "stopped"
@@ -783,15 +1000,16 @@ def cmd_ls(a):
         if m.get("state") == "run":
             m["mem_now"] = job_mem(m)
     if a.json:
-        print(json.dumps({"host": platform.node(), "os": SYS, "room": room(all_jobs()), "jobs": jobs}))
+        print(json.dumps({"host": platform.node(), "os": SYS, "room": host_room(all_jobs()), "jobs": jobs}))
         return
     print("%-24s %-8s %-14s %-22s %7s %7s %5s %7s  %s" % ("ID", "STATE", "PROJECT", "NAME", "MEM", "PEAK", "CAP", "AGE", "OWNER"))
     for m in jobs:
         age = (m.get("ended") or now()) - (m.get("started") or m.get("created") or now())
         print("%-24s %-8s %-14s %-22s %6.1fG %6.1fG %4gG %6.0fm  %s" % (
-            m["id"], m.get("state"), (m.get("project") or "")[:14], (m.get("name") or "")[:22], (m.get("mem_now") or 0) / GB,
+            m["id"], "paused" if is_paused(m) else m.get("state"),
+            (m.get("project") or "")[:14], (m.get("name") or "")[:22], (m.get("mem_now") or 0) / GB,
             (m.get("peak_bytes") or 0) / GB, m.get("mem_gb") or 0, age / 60, (m.get("owner") or "")[:36]))
-    print("room for a new job now: %.1f GB" % (room(all_jobs()) / GB))
+    print("room for a new job now: %.1f GB" % (host_room(all_jobs()) / GB))
 
 
 def cmd_logs(a):
@@ -825,6 +1043,8 @@ def cmd_stop(a):
         return
     update(jid, state="stopped", ended=now())
     if SYS == "Linux":
+        if is_paused(m):
+            cg_write(unit_cgroup(m) / "cgroup.freeze", 0)
         subprocess.run(([] if os.geteuid() == 0 else ["sudo", "-n"]) + ["systemctl", "stop", m["unit"] + ".service"])
     elif SYS == "Darwin":
         for pid in (m.get("child_pgid"),):
@@ -862,6 +1082,23 @@ def cmd_install(a):
         os.chmod(dst, 0o755)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     print("agentjobs.slice: MemoryMax=%dG of %.0f GB RAM; %s installed" % (mx, tot, dst))
+    user = os.environ.get("SUDO_USER") or "root"
+    Path("/etc/systemd/system/agentjobs-watch-%s.service" % user).write_text(
+        "[Unit]\nDescription=Agent jobs memory watcher (%s)\n\n"
+        "[Service]\nUser=%s\nExecStart=%s %s _watch\nRestart=always\nRestartSec=2\nOOMScoreAdjust=-900\n\n"
+        "[Install]\nWantedBy=multi-user.target\n" % (user, user, sys.executable, dst))
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", "agentjobs-watch-%s.service" % user], check=True)
+    subprocess.run(["systemctl", "restart", "agentjobs-watch-%s.service" % user], check=True)
+    print("agentjobs-watch-%s.service runs" % user)
+
+
+def host_room(jobs):
+    """Bytes a new job can have now. Linux: measured free memory (0 while the door is closed)."""
+    if SYS != "Linux":
+        return room(jobs)
+    ok, _ = door({}, jobs)
+    return max(0, free_now(jobs)) if ok else 0
 
 
 def cmd_room(a):
@@ -873,8 +1110,9 @@ def cmd_room(a):
     except (OSError, AttributeError):
         load = 0.0
     q = [m for m in jobs if m.get("state") == "queued"]
-    print(json.dumps({"host": platform.node(), "room_gb": round(room(jobs) / GB, 1), "cores": n, "load": round(load, 1),
-                      "running": sum(1 for m in jobs if m.get("state") == "run"), "queued": len(q),
+    print(json.dumps({"host": platform.node(), "room_gb": round(host_room(jobs) / GB, 1), "cores": n, "load": round(load, 1),
+                      "running": sum(1 for m in jobs if m.get("state") == "run" and not is_paused(m)),
+                      "paused": sum(1 for m in jobs if is_paused(m)), "queued": len(q),
                       "oldest_wait_min": round((now() - min(m["created"] for m in q)) / 60) if q else 0}))
 
 
@@ -920,6 +1158,9 @@ def main():
     r.add_argument("--cpus", type=int, help="math threads; on Mac, reserved CPU slots (default 1, host limit cores minus 4)")
     r.add_argument("--swap-gb", type=float, default=1.0, help="swap the job may use (Linux)")
     r.add_argument("--wait", action="store_true", help="stay in the foreground: print the log, exit with the job's code")
+    r.add_argument("--queue", action="store_true", help="Linux: when the host is full, wait here (default: exit 75, job not started)")
+    r.add_argument("--no-pause", action="store_true", help="Linux: never pause or kill this job for memory (services; "
+                   "jobs that hold a lock or a connection that others need)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     l = sp.add_parser("ls")
     l.add_argument("--json", action="store_true")
@@ -938,12 +1179,14 @@ def main():
     sv = sp.add_parser("_supervise")
     sv.add_argument("id")
     sp.add_parser("_requeue")
+    sp.add_parser("_watch")
     sp.add_parser("room")
     wh = sp.add_parser("where")
     wh.add_argument("--json", action="store_true")
     a = ap.parse_args()
     {"run": cmd_run, "ls": cmd_ls, "logs": cmd_logs, "wait": cmd_wait, "stop": cmd_stop, "install": cmd_install,
-     "room": cmd_room, "where": cmd_where, "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
+     "room": cmd_room, "where": cmd_where, "_watch": cmd_watch,
+     "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
 
 
 if __name__ == "__main__":

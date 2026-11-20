@@ -92,12 +92,21 @@ Linux, macOS and Windows):
     job ls | job logs ID | job wait ID --timeout 600 | job stop ID
     job where     # room, queue and free cores on each host in ~/.agentjobs/hosts, most room first
 
-Each job outlives the shell, waits until the machine has its peak memory free, stops at --mem-gb (Linux: cgroup
-MemoryMax in agentjobs-<project>.slice under a capped agentjobs.slice; Windows: a Job Object; macOS: an RSS watchdog),
-and records owner, exit code and peak memory in ~/.agentjobs/. The queue is built for speed without swap thrashing:
---peak-gb is only a first guess, and later runs with the same project and name use the measured peak; a running job
-reserves only 1.5x what it has used after 2 minutes; no job starts while memory pressure (PSI) is high or the CPUs are
-far over capacity. On macOS, jobs share cores minus four CPU slots (at least one), across all projects.
+Each job outlives the shell and records owner, exit code and peak memory in ~/.agentjobs/.
+
+On Linux there is no memory prediction and no queue of reservations. A job starts when the host has real free memory
+(2 GB, or half of the --peak-gb hint). If the host is full, 'job run' exits with code 75 and does not start the job:
+use another host, or add --queue to wait. A watcher ('job _watch', one systemd service) reads the real memory values
+every 2 seconds. When memory is short, it pauses one job: the youngest job of the project that uses the most job
+memory. A paused job is frozen and a part of its memory goes to swap; it resumes automatically, oldest first, when
+memory is free again. A job is killed only when a pause cannot help (swap is full, or one job alone fills the host),
+and a killed job is never started again. --no-pause protects a service or a job that holds a lock others need.
+All jobs together stay under the cap of agentjobs.slice, so services and SSH keep their memory.
+jobs/prove.py fills a host on purpose and measures that nothing outside the jobs stalls.
+
+On macOS and Windows a job waits until the machine has its peak memory free and stops at --mem-gb (Windows: a Job
+Object; macOS: an RSS watchdog); later runs with the same project and name use the measured peak.
+On macOS, jobs share cores minus four CPU slots (at least one), across all projects.
 --cpus reserves slots and sets math threads; the Mac default is one, including when thread environment variables
 were set by the caller. Requests above the host limit fail. Old jobs without --cpus count as four until they end.
 After 2 minutes a Mac job holds only 1.5x the cores it really uses, so a job that sleeps or waits on the network

@@ -38,6 +38,58 @@ class Reserved(unittest.TestCase):
         self.assertAlmostEqual(self.run_job(age=600, anon_peak=5.0, mem_now=5.5), 0.5)
 
 
+class Measured(unittest.TestCase):
+    """Linux rules: start on measured free memory, pause on measured pressure."""
+    def patches(self, free=10.0, psi=0.0, paused=(), swap=20.0, mem=None):
+        mem = mem or {}
+        return [mock.patch.object(job, "free_now", return_value=free * GB), mock.patch.object(job, "mem_pressure", return_value=psi),
+                mock.patch.object(job, "is_paused", side_effect=lambda m: m.get("id") in paused),
+                mock.patch.object(job, "swap_free", return_value=swap * GB),
+                mock.patch.object(job, "job_mem", side_effect=lambda m: mem.get(m["id"], 0) * GB)]
+
+    def run_with(self, ps, fn):
+        for p in ps:
+            p.start()
+        try:
+            return fn()
+        finally:
+            for p in ps:
+                p.stop()
+
+    def test_door_uses_half_of_the_hint_and_at_least_start_gb(self):
+        self.assertTrue(self.run_with(self.patches(free=2.5), lambda: job.door({"peak_given": 4}, []))[0])
+        self.assertFalse(self.run_with(self.patches(free=2.5), lambda: job.door({"peak_given": 8}, []))[0])
+        self.assertFalse(self.run_with(self.patches(free=1.5), lambda: job.door({}, []))[0])
+
+    def test_door_is_closed_while_a_job_is_paused_or_pressure_is_high(self):
+        self.assertFalse(self.run_with(self.patches(paused=("a",)), lambda: job.door({}, [{"id": "a", "state": "run"}]))[0])
+        self.assertFalse(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0])
+
+    def test_victim_is_the_youngest_job_of_the_largest_project(self):
+        t = job.now()
+        jobs = [{"id": "old", "state": "run", "project": "big", "started": t - 9000}, {"id": "new", "state": "run", "project": "big", "started": t - 60},
+                {"id": "other", "state": "run", "project": "small", "started": t - 5}, {"id": "tiny", "state": "run", "project": "big", "started": t - 1},
+                {"id": "svc", "state": "run", "project": "big", "started": t - 2, "no_pause": True},
+                {"id": "back", "state": "run", "project": "big", "started": t - 3, "resumed": t - 10}]
+        mem = {"old": 8, "new": 4, "other": 6, "tiny": 0.1, "svc": 9, "back": 5}
+        order = self.run_with(self.patches(mem=mem), lambda: [m["id"] for m in job.victims(jobs)])
+        self.assertEqual(order, ["new", "old", "other", "back"])
+
+    def test_relieve_pauses_and_kills_only_when_swap_is_full(self):
+        t = job.now()
+        jobs = [{"id": "a", "state": "run", "project": "p", "started": t - 60, "unit": "u", "slice": "s"},
+                {"id": "b", "state": "run", "project": "p", "started": t - 600, "unit": "u2", "slice": "s"}]
+        for swap, want in ((20, "pause"), (2.5, "kill")):
+            with mock.patch.object(job, "cg_write", return_value=True) as w, mock.patch.object(job, "kill_job") as k, \
+                    mock.patch.object(job, "update"), mock.patch.object(job, "watch_log"), mock.patch.object(job, "Lock"):
+                got = self.run_with(self.patches(swap=swap, mem={"a": 3, "b": 3}), lambda: job.relieve(jobs))
+            self.assertEqual(got, want)
+            self.assertEqual(k.called, want == "kill")
+            if want == "pause":
+                self.assertTrue(str(w.call_args_list[0][0][0]).endswith("u.service/cgroup.freeze"))
+
+
+
 class Plan(unittest.TestCase):
     def test_room_holds_the_largest_regrowth_and_a_share_of_the_others(self):
         t = job.now()
