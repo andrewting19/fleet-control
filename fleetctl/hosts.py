@@ -73,6 +73,7 @@ def view(cfg, store, project_of, now):
                   "reachable": reachable, "error": None if reachable else d.get("error"), "hist": hist[-180:]})
         v["procs"], v["projects"] = _procs(d, project_of)
         v["jobs"] = d.get("jobs") or []
+        v["job_events"] = d.get("job_events") or {}
         _swap(v, d, h, hist, project_of)
         v["status"], v["reasons"] = _status(v, h, th)
         hog = next((e for e in v["projects"] if e["project"] != "system"), None) or (v["projects"][0] if v["projects"] else None)
