@@ -67,15 +67,12 @@ class Measured(unittest.TestCase):
             with mock.patch.object(job, "available", return_value=avail * GB), mock.patch.object(job, "total_ram", return_value=64 * GB):
                 self.assertEqual(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0], is_open)
 
-    def test_victim_is_the_youngest_job_of_the_largest_project(self):
-        pass
-
     def test_door_is_closed_when_swap_is_almost_full(self):
         for free, is_open in ((3, False), (20, True)):
             with mock.patch.object(job, "swap_total", return_value=55 * GB):
                 self.assertEqual(self.run_with(self.patches(swap=free), lambda: job.door({}, []))[0], is_open)
 
-    def test_victim_order(self):
+    def test_victim_is_the_youngest_job_of_the_largest_project(self):
         t = job.now()
         jobs = [{"id": "old", "state": "run", "project": "big", "started": t - 9000}, {"id": "new", "state": "run", "project": "big", "started": t - 60},
                 {"id": "other", "state": "run", "project": "small", "started": t - 5}, {"id": "tiny", "state": "run", "project": "big", "started": t - 1},
