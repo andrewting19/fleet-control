@@ -193,9 +193,11 @@ const JOB_BAD = { killed: "c-warn", lost: "c-warn", failed: "c-warn" };
 function jobPill(h) {
   const js = h.jobs || [], run = js.filter((j) => j.state === "run").length, q = js.filter((j) => j.state === "queued").length;
   const bad = js.filter((j) => JOB_BAD[j.state]).length;
-  if (!run && !q && !bad) return "";
-  const t = [run && run + " running", q && q + " waiting for memory", bad && bad + " killed or failed (6 h)"].filter(Boolean).join(", ");
-  return '<span class="mut' + (bad ? " c-warn" : "") + '" data-tip="Jobs started with job run: ' + t + '">' + (run + q) + (run + q === 1 ? " job" : " jobs") + (q ? " · " + q + " queued" : "") + "</span>";
+  const ev = h.job_events || {};
+  if (!run && !q && !bad && !ev.kill) return "";
+  const t = [run && run + " running", q && q + " waiting for memory", bad && bad + " killed or failed (6 h)",
+    (ev.pause || ev.kill || ev.reject) && "memory watcher in 24 h: " + (ev.pause || 0) + " paused, " + (ev.kill || 0) + " killed, " + (ev.reject || 0) + " rejected"].filter(Boolean).join(", ");
+  return '<span class="mut' + (bad || ev.kill ? " c-warn" : "") + '" data-tip="Jobs started with job run: ' + t + '">' + (run + q) + (run + q === 1 ? " job" : " jobs") + (q ? " · " + q + " queued" : "") + (ev.kill ? " · " + ev.kill + " killed" : "") + "</span>";
 }
 function jobTable(h) {
   const js = (h.jobs || []).slice().reverse().slice(0, 8);

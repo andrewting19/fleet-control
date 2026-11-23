@@ -317,11 +317,43 @@ def victims(jobs):
 def kill_job(m, why):
     update(m["id"], state="killed", why=why, watch_why=why, ended=now(), signal=9, peak_bytes=max(m.get("peak_bytes") or 0, m.get("_mem") or 0))
     watch_log(m, "killed: " + why)
+    event("kill", m, why=why)
     cg_write(unit_cgroup(m) / "cgroup.freeze", 0)
     priv(["systemctl", "kill", "--signal=SIGKILL", m["unit"] + ".service"])
 
 
-def relieve(jobs):
+def event(ev, m=None, **kw):
+    """Add one line to <state>/events.jsonl: each pause, resume, kill and rejected start, with the memory values at
+    that time. 'job room' and the dashboard count these."""
+    try:
+        e = {"t": round(now()), "ev": ev, "avail_gb": round(available() / GB, 1), "psi": mem_pressure()}
+        if m:
+            e.update({k: m.get(k) for k in ("id", "project", "name", "owner")})
+        e.update(kw)
+        with open(STATE / "events.jsonl", "a") as f:
+            f.write(json.dumps(e) + "\n")
+    except (OSError, ValueError):
+        pass
+
+
+def event_counts(hours=24):
+    """{event: count} for the last hours."""
+    c, cut = {}, now() - hours * 3600
+    try:
+        with open(STATE / "events.jsonl") as f:
+            for ln in f.readlines()[-5000:]:
+                try:
+                    e = json.loads(ln)
+                except ValueError:
+                    continue
+                if e.get("t", 0) >= cut:
+                    c[e.get("ev")] = c.get(e.get("ev"), 0) + 1
+    except OSError:
+        pass
+    return c
+
+
+def relieve(jobs, cause=""):
     """Memory is short now. Pause the first job of victims() and move as much of its memory to swap as the swap can
     take (SWAP_KEEP stays free). A paused job stops growing and stops using its memory, so a part is enough.
     Kill only when a pause cannot help: swap is full, or the job is the only one here and it filled the host
@@ -346,7 +378,8 @@ def relieve(jobs):
         if not cg_write(cg / "cgroup.freeze", 1):
             return None
         update(m["id"], paused=now(), pauses=(m.get("pauses") or 0) + 1)
-    watch_log(m, "paused: host memory is short (this job holds %.1f GB). It resumes automatically." % (mem / GB))
+    watch_log(m, "paused: host memory is short (%sthis job holds %.1f GB). It resumes automatically." % (cause and cause + "; ", mem / GB))
+    event("pause", m, cause=cause, mem_gb=round(mem / GB, 1))
     cg_write(cg / "memory.swap.max", "max")
     cg_write(cg / "memory.reclaim", "%d" % min(mem, space))  # a partial result is fine
     return "pause"
@@ -376,6 +409,7 @@ def resume_one(jobs):
     t = m.get("paused") or now()
     update(m["id"], paused=None, resumed=now(), paused_s=(m.get("paused_s") or 0) + now() - t)
     watch_log(m, "resumed after %.0f s" % (now() - t))
+    event("resume", m, paused_s=round(now() - t))
     return True
 
 
@@ -398,7 +432,9 @@ def cmd_watch(a):
                 hot, calm = hot or now(), None
                 urgent = av < low / 2 or near  # near: the jobs are close to the slice cap, where the kernel kills
                 if now() - hot >= (0 if urgent else HOT_S) and now() - acted >= (4 if urgent else ACT_GAP_S):
-                    if relieve(all_jobs()):
+                    cause = "%.1f GB available" % (av / GB) if av < low else "jobs hold %.0f%% of their %.0f GB cap" % (
+                        100.0 * cg_anon(CG / PARENT) / lim, lim / GB) if near else "pressure %.0f%%, %.1f GB available" % (psi, av / GB)
+                    if relieve(all_jobs(), cause):
                         acted = now()
             else:
                 hot = None
@@ -712,6 +748,7 @@ def cmd_run(a):
         if not ok and not a.queue:
             print("job run: %s is full: %s. The job did NOT start. Use another host ('job where' shows the room on "
                   "each host), or add --queue to wait here." % (platform.node(), why), file=sys.stderr)
+            event("reject", {"project": project, "name": name, "owner": a.owner or os.environ.get("CODEX_THREAD_ID") or ""}, why=why)
             sys.exit(FULL_EXIT)
         if not ok:
             print("job run: %s. This job waits (--queue)." % why, file=sys.stderr)
@@ -757,6 +794,14 @@ def cmd_run(a):
         update(jid, sup_pid=pid)
     print(jid)
     print("job %s: %s, peak %g GB, cap %g GB. Watch: job ls / job logs %s / job wait %s" % (jid, project, a.peak_gb, mem_gb, jid, jid), file=sys.stderr)
+    if SYS == "Linux":
+        try:
+            load, n = os.getloadavg()[0], os.cpu_count() or 1
+            if load > 1.25 * n:
+                print("job run: note: %s has no free CPU core (load %.0f on %d cores), so this job runs slower here. "
+                      "'job where' shows hosts with free cores." % (platform.node(), load, n), file=sys.stderr)
+        except OSError:
+            pass
     if a.wait:
         sys.exit(follow(jid))
 
@@ -1138,7 +1183,8 @@ def cmd_room(a):
     print(json.dumps({"host": platform.node(), "room_gb": round(host_room(jobs) / GB, 1), "cores": n, "load": round(load, 1),
                       "running": sum(1 for m in jobs if m.get("state") == "run" and not is_paused(m)),
                       "paused": sum(1 for m in jobs if is_paused(m)), "queued": len(q),
-                      "oldest_wait_min": round((now() - min(m["created"] for m in q)) / 60) if q else 0}))
+                      "oldest_wait_min": round((now() - min(m["created"] for m in q)) / 60) if q else 0,
+                      "events_24h": event_counts()}))
 
 
 def cmd_where(a):
@@ -1161,12 +1207,15 @@ def cmd_where(a):
     if a.json:
         print(json.dumps({h: r for h, r in rows}))
         return
-    print("%-12s %8s %7s %7s %6s %10s" % ("HOST", "ROOM", "QUEUED", "RUNNING", "CORES", "FREE CORES"))
+    print("%-12s %8s %7s %7s %6s %10s  %s" % ("HOST", "ROOM", "QUEUED", "RUNNING", "CORES", "FREE CORES", "LAST 24 H"))
     for h, r in sorted(rows, key=lambda x: -(x[1] or {}).get("room_gb", -1e9)):
         if not r:
             print("%-12s %8s" % (h, "no answer"))
             continue
-        print("%-12s %7.1fG %7d %7d %6d %10.0f" % (h, r["room_gb"], r["queued"], r["running"], r["cores"], max(0, r["cores"] - r["load"])))
+        ev = r.get("events_24h") or {}
+        print("%-12s %7.1fG %7d %7d %6d %10.0f  %d paused, %d killed, %d rejected" % (
+            h, r["room_gb"], r["queued"], r["running"], r["cores"], max(0, r["cores"] - r["load"]),
+            ev.get("pause", 0), ev.get("kill", 0), ev.get("reject", 0)))
 
 
 def main():

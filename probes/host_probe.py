@@ -301,6 +301,23 @@ def agentjobs():
     return sorted(out, key=lambda m: m.get("created") or 0)[-30:]
 
 
+def job_events(hours=24):
+    """Counts of watcher pauses and kills and of rejected starts in the last hours (jobs/job.py writes events.jsonl)."""
+    c, cut = {}, time.time() - hours * 3600
+    try:
+        with open(os.path.expanduser("~/.agentjobs/events.jsonl")) as f:
+            for ln in f.readlines()[-5000:]:
+                try:
+                    e = json.loads(ln)
+                except ValueError:
+                    continue
+                if e.get("t", 0) >= cut:
+                    c[e.get("ev")] = c.get(e.get("ev"), 0) + 1
+    except OSError:
+        pass
+    return c
+
+
 def main():
     t = time.time()
     data = {"ok": True, "hostname": socket.gethostname(), "os": platform.system(), "cores": os.cpu_count(), "load": list(os.getloadavg())}
@@ -308,6 +325,7 @@ def main():
     data["disks"] = disks()
     data["gpus"] = gpus()
     data["jobs"] = agentjobs()
+    data["job_events"] = job_events()
     data["ts"] = time.time()
     data["probe_ms"] = int((time.time() - t) * 1000)
     print(json.dumps(data))
