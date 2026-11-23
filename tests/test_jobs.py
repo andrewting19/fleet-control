@@ -63,7 +63,9 @@ class Measured(unittest.TestCase):
 
     def test_door_is_closed_while_a_job_is_paused_or_pressure_is_high(self):
         self.assertFalse(self.run_with(self.patches(paused=("a",)), lambda: job.door({}, [{"id": "a", "state": "run"}]))[0])
-        self.assertFalse(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0])
+        for avail, is_open in ((4, False), (20, True)):  # pressure closes the door only when the host is also low on memory
+            with mock.patch.object(job, "available", return_value=avail * GB), mock.patch.object(job, "total_ram", return_value=64 * GB):
+                self.assertEqual(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0], is_open)
 
     def test_victim_is_the_youngest_job_of_the_largest_project(self):
         t = job.now()

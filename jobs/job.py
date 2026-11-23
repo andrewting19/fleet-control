@@ -49,6 +49,7 @@ ACT_GAP_S = 15  # time between two watcher actions, to see the effect of the fir
 CALM_S = 30  # memory must be calm this long before a paused job resumes
 STUCK_S = 1800  # a paused job alone on the host whose swap cannot fit in free memory is killed after this long
 IMMUNE_S = 300  # a resumed job is not paused again for this long, if another job can be
+READBACK_S = 600  # a resumed job reads the memory that it needs back from swap in this time; what stays in swap after is cold
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
@@ -265,9 +266,12 @@ def free_now(jobs, skip=None):
     for m in jobs:
         if m.get("state") == "run" and m.get("id") != skip and now() - (m.get("started") or 0) < YOUNG_S:
             r -= max(0, (m.get("peak_given") or START_GB) * GB / 2 - job_mem(m))
-        if m.get("state") == "run" and m.get("id") != skip and m.get("unit") and not is_paused(m):
+        if m.get("state") == "run" and m.get("id") != skip and m.get("unit") and not is_paused(m) \
+                and now() - (m.get("resumed") or 0) < READBACK_S:
             # a resumed job reads its swap back into memory (alphas-1 Nov 23: 4 queued jobs started beside a job
-            # with 7 GB in swap, and 3 were killed a minute later)
+            # with 7 GB in swap, and 3 were killed a minute later). Only for READBACK_S: swap that a job did not
+            # read back by then is memory that it does not use (tingbox2 Nov 23: 10 GB available, 8 GB of old swap,
+            # 7 jobs queued)
             r -= cg_int(unit_cgroup(m) / "memory.swap.current") or 0
     return r
 
@@ -277,7 +281,8 @@ def door(me, jobs):
     paused = [m for m in jobs if is_paused(m)]
     if paused:
         return False, "%d job%s paused here because memory is short" % (len(paused), " is" if len(paused) == 1 else "s are")
-    if mem_pressure() > PSI_FULL_MAX:
+    low = max(2 * GB, LOW_FRAC * total_ram())
+    if mem_pressure() > PSI_FULL_MAX and available() <= PSI_ROOM * low:  # same rule as the watcher
         return False, "memory pressure is high"
     need = max(START_GB, (me.get("peak_given") or 0) / 2) * GB
     free = free_now(jobs, me.get("id"))
