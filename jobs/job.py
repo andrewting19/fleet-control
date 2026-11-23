@@ -265,6 +265,10 @@ def free_now(jobs, skip=None):
     for m in jobs:
         if m.get("state") == "run" and m.get("id") != skip and now() - (m.get("started") or 0) < YOUNG_S:
             r -= max(0, (m.get("peak_given") or START_GB) * GB / 2 - job_mem(m))
+        if m.get("state") == "run" and m.get("id") != skip and m.get("unit") and not is_paused(m):
+            # a resumed job reads its swap back into memory (alphas-1 Nov 23: 4 queued jobs started beside a job
+            # with 7 GB in swap, and 3 were killed a minute later)
+            r -= cg_int(unit_cgroup(m) / "memory.swap.current") or 0
     return r
 
 
