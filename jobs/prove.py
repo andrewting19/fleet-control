@@ -79,7 +79,7 @@ stop = True; time.sleep(1.2)
 js = [m for m in jobs() if m["id"] in ids]
 st = {}
 for m in js: st[m["state"]] = st.get(m["state"], 0) + 1
-print("RESULT scenario=%s jobs=%d states=%s rejected=%d paused_jobs=%d pauses=%d seconds=%d" % (sc, len(js), st, rejected, len(seen_paused), sum(m.get("pauses") or 0 for m in js), time.time() - t0))
+print("RESULT scenario=%s jobs=%d states=%s rejected=%d paused_jobs=%d pauses=%d paused_seconds=%d seconds=%d" % (sc, len(js), st, rejected, len(seen_paused), sum(m.get("pauses") or 0 for m in js), sum(m.get("paused_s") or 0 for m in js), time.time() - t0))
 print("RESULT min_available=%.1f GB min_swap_free=%.1f GB max_psi_full_avg10=%.1f%% host_stall_total=%.1f s" % (min(s[1] for s in samples), min(s[2] for s in samples), max(s[3] for s in samples), (psi()[1] - psi0) / 1e6))
 print("RESULT probe outside the jobs: samples=%d max_delay=%.2f s delays_over_1s=%d" % (stall["n"], stall["max"], stall["over1s"]))
 for m in js:
