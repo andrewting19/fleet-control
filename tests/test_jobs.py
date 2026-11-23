@@ -67,6 +67,24 @@ class Measured(unittest.TestCase):
             with mock.patch.object(job, "available", return_value=avail * GB), mock.patch.object(job, "total_ram", return_value=64 * GB):
                 self.assertEqual(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0], is_open)
 
+    def test_better_host_only_when_this_host_has_no_core_and_another_has(self):
+        import tempfile, pathlib, json, os
+        d = pathlib.Path(tempfile.mkdtemp())
+        peers = {"a": {"host": "me", "cores": 16, "load": 1, "room_gb": 20, "queued": 0, "paused": 0},
+                 "b": {"host": "b", "cores": 16, "load": 6, "room_gb": 10, "queued": 0, "paused": 0},
+                 "c": {"host": "c", "cores": 16, "load": 2, "room_gb": 1, "queued": 0, "paused": 0}, "d": None}
+        (d / "peers.json").write_text(json.dumps(peers))
+        with mock.patch.object(job, "STATE", d), mock.patch.object(job.platform, "node", return_value="me"), \
+                mock.patch.object(job.os, "cpu_count", return_value=20):
+            with mock.patch.object(job.os, "getloadavg", return_value=(80, 0, 0)):
+                self.assertEqual(job.better_host(4)[0], "b")  # not itself, not the host with no room
+                self.assertIsNone(job.better_host(40))  # no host has the room
+                os.utime(d / "peers.json", (1, 1))
+                self.assertIsNone(job.better_host(4))  # old file: start here
+            (d / "peers.json").write_text(json.dumps(peers))
+            with mock.patch.object(job.os, "getloadavg", return_value=(30, 0, 0)):
+                self.assertIsNone(job.better_host(4))  # this host is fine
+
     def test_door_is_closed_when_swap_is_almost_full(self):
         for free, is_open in ((3, False), (20, True)):
             with mock.patch.object(job, "swap_total", return_value=55 * GB):

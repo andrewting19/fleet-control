@@ -54,6 +54,9 @@ SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
 SWAP_DOOR = 0.1  # no new job starts when less than this share of the swap is free (at least 4 GB): pauses need swap
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
+CPU_X = float(os.environ.get("AGENTJOBS_CPU_X") or 2.0)  # a job is sent to another host when the load is above this times the cores ...
+PEER_FREE = 2  # ... and another host has at least this many free cores, and memory room
+PEER_STALE_S = 180  # the peers file (written by 'job _peers' from another machine) is ignored when older than this
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
                "VECLIB_MAXIMUM_THREADS", "NUMBA_NUM_THREADS", "POLARS_MAX_THREADS", "RAYON_NUM_THREADS")
@@ -768,6 +771,16 @@ def cmd_run(a):
             sys.exit(FULL_EXIT)
         if not ok:
             print("job run: %s. This job waits (--queue)." % why, file=sys.stderr)
+        if ok and not a.queue and not a.no_pause:
+            b = better_host(given)
+            if b:
+                why = "no free CPU core here (load %.0f on %d cores); %s has %.0f free cores and %.0f GB of room" % (
+                    b[2], b[3], b[0], b[1]["cores"] - b[1]["load"], b[1]["room_gb"])
+                print("job run: %s is full: %s. The job did NOT start. Run it on %s, where it is faster. If it must "
+                      "run on this host, add --queue: then it starts here now." % (platform.node(), why, b[0]), file=sys.stderr)
+                event("reject", {"project": project, "name": name, "owner": a.owner or os.environ.get("CODEX_THREAD_ID") or ""},
+                      why="cpu: " + why, to=b[0])
+                sys.exit(FULL_EXIT)
     else:
         fits = room(all_jobs()) / GB
         if fits < a.peak_gb:
@@ -1203,6 +1216,60 @@ def cmd_room(a):
                       "events_24h": event_counts()}))
 
 
+def better_host(given):
+    """(name, row, load, cores) of another job host that has free cores and memory room now, when this host has
+    none: the load is above CPU_X times the cores. None when this host is fine, when no other host is better, or
+    when the peers file is old or missing (then every job starts here)."""
+    try:
+        load, n = os.getloadavg()[0], os.cpu_count() or 1
+        if load <= CPU_X * n:
+            return None
+        f = STATE / "peers.json"
+        if time.time() - f.stat().st_mtime > PEER_STALE_S:
+            return None
+        rows = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
+    need = max(START_GB, float(given or 0) / 2)
+    best = None
+    for name, r in rows.items():
+        if not r or r.get("host") == platform.node() or r.get("queued") or r.get("paused"):
+            continue
+        free = r.get("cores", 0) - r.get("load", 1e9)
+        if free >= PEER_FREE and r.get("room_gb", 0) >= need and (not best or free > best[1].get("cores", 0) - best[1].get("load", 0)):
+            best = (name, r, load, n)
+    return best
+
+
+def cmd_peers(a):
+    """Ask each job host for its room ('job where') and give the answers to each host as <state>/peers.json.
+    Run it each minute from one machine that can reach all hosts. Hosts use it to send jobs to a host with free cores."""
+    from concurrent.futures import ThreadPoolExecutor
+    f = STATE / "hosts"
+    hosts = (os.environ.get("AGENTJOBS_HOSTS") or (f.read_text() if f.exists() else "")).split()
+    opt = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6"]
+
+    def ask(h):
+        try:
+            out = subprocess.run(opt + [h, "job room"], capture_output=True, text=True, timeout=20).stdout
+            return h, json.loads(out.strip().splitlines()[-1])
+        except Exception:
+            return h, None
+
+    def give(h):
+        try:
+            subprocess.run(opt + [h, "cat > ~/.agentjobs/peers.tmp && mv ~/.agentjobs/peers.tmp ~/.agentjobs/peers.json"],
+                           input=data, text=True, capture_output=True, timeout=20)
+        except Exception:
+            pass
+    if not hosts:
+        return
+    with ThreadPoolExecutor(len(hosts)) as ex:
+        rows = dict(ex.map(ask, hosts))
+        data = json.dumps(rows)
+        list(ex.map(give, [h for h in hosts if rows.get(h)]))
+
+
 def cmd_where(a):
     """Show the room on each job host, most room first. Hosts: AGENTJOBS_HOSTS or the file <state>/hosts."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1270,12 +1337,13 @@ def main():
     sv.add_argument("id")
     sp.add_parser("_requeue")
     sp.add_parser("_watch")
+    sp.add_parser("_peers")
     sp.add_parser("room")
     wh = sp.add_parser("where")
     wh.add_argument("--json", action="store_true")
     a = ap.parse_args()
     {"run": cmd_run, "ls": cmd_ls, "logs": cmd_logs, "wait": cmd_wait, "stop": cmd_stop, "install": cmd_install,
-     "room": cmd_room, "where": cmd_where, "_watch": cmd_watch,
+     "room": cmd_room, "where": cmd_where, "_watch": cmd_watch, "_peers": cmd_peers,
      "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
 
 
