@@ -52,6 +52,7 @@ IMMUNE_S = 300  # a resumed job is not paused again for this long, if another jo
 READBACK_S = 600  # a resumed job reads the memory that it needs back from swap in this time; what stays in swap after is cold
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
+SWAP_DOOR = 0.1  # no new job starts when less than this share of the swap is free (at least 4 GB): pauses need swap
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
 ENDED = ("done", "failed", "killed", "stopped", "lost")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
@@ -235,6 +236,16 @@ def cg_write(path, value):
         return False
 
 
+def swap_total():
+    try:
+        for ln in open("/proc/meminfo"):
+            if ln.startswith("SwapTotal:"):
+                return int(ln.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
 def swap_free():
     try:
         for ln in open("/proc/meminfo"):
@@ -284,6 +295,10 @@ def door(me, jobs):
     low = max(2 * GB, LOW_FRAC * total_ram())
     if mem_pressure() > PSI_FULL_MAX and available() <= PSI_ROOM * low:  # same rule as the watcher
         return False, "memory pressure is high"
+    st = swap_total()
+    if st and swap_free() < max(4 * GB, SWAP_DOOR * st):
+        # tingbox Nov 23: 105 jobs, 54 of 55 GB swap used, 7 jobs killed in 1 h because no job could be paused
+        return False, "swap is almost full (%.1f GB free)" % (swap_free() / GB)
     need = max(START_GB, (me.get("peak_given") or 0) / 2) * GB
     free = free_now(jobs, me.get("id"))
     if free < need:
@@ -353,7 +368,7 @@ def event_counts(hours=24):
     return c
 
 
-def relieve(jobs, cause=""):
+def relieve(jobs, cause="", short=True):
     """Memory is short now. Pause the first job of victims() and move as much of its memory to swap as the swap can
     take (SWAP_KEEP stays free). A paused job stops growing and stops using its memory, so a part is enough.
     Kill only when a pause cannot help: swap is full, or the job is the only one here and it filled the host
@@ -364,7 +379,7 @@ def relieve(jobs, cause=""):
     m = order[0]
     mem, cg = m["_mem"], unit_cgroup(m)
     space = swap_free() - SWAP_KEEP * GB
-    if space < 1 * GB:
+    if space < 1 * GB and short:
         kill_job(m, "memory was short and swap is full, so no job could be paused. This job (%.1f GB) was the newest "
                     "of the project that used the most memory. It was not started again. Use a host with room "
                     "('job where')." % (mem / GB))
@@ -381,7 +396,8 @@ def relieve(jobs, cause=""):
     watch_log(m, "paused: host memory is short (%sthis job holds %.1f GB). It resumes automatically." % (cause and cause + "; ", mem / GB))
     event("pause", m, cause=cause, mem_gb=round(mem / GB, 1))
     cg_write(cg / "memory.swap.max", "max")
-    cg_write(cg / "memory.reclaim", "%d" % min(mem, space))  # a partial result is fine
+    if space >= 1 * GB:  # with full swap and only pressure (memory is still available), the freeze alone must do
+        cg_write(cg / "memory.reclaim", "%d" % min(mem, space))  # a partial result is fine
     return "pause"
 
 
@@ -434,7 +450,7 @@ def cmd_watch(a):
                 if now() - hot >= (0 if urgent else HOT_S) and now() - acted >= (4 if urgent else ACT_GAP_S):
                     cause = "%.1f GB available" % (av / GB) if av < low else "jobs hold %.0f%% of their %.0f GB cap" % (
                         100.0 * cg_anon(CG / PARENT) / lim, lim / GB) if near else "pressure %.0f%%, %.1f GB available" % (psi, av / GB)
-                    if relieve(all_jobs(), cause):
+                    if relieve(all_jobs(), cause, short=av < low or near):
                         acted = now()
             else:
                 hot = None
