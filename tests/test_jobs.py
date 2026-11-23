@@ -88,6 +88,17 @@ class Measured(unittest.TestCase):
             if want == "pause":
                 self.assertTrue(str(w.call_args_list[0][0][0]).endswith("u.service/cgroup.freeze"))
 
+    def test_relieve_kills_a_lone_job_only_if_it_is_large(self):
+        t = job.now()
+        one = {"id": "a", "state": "run", "project": "p", "started": t - 60, "unit": "u", "slice": "s", "pauses": 2}
+        frozen = {"id": "b", "state": "run", "project": "p", "started": t - 600, "unit": "u2", "slice": "s"}
+        for jobs, paused, gb, want in (([one], (), 1, "pause"), ([one], (), 20, "kill"), ([one, frozen], ("b",), 20, "pause")):
+            with mock.patch.object(job, "cg_write", return_value=True), mock.patch.object(job, "kill_job") as k, \
+                    mock.patch.object(job, "update"), mock.patch.object(job, "watch_log"), mock.patch.object(job, "Lock"), \
+                    mock.patch.object(job, "total_ram", return_value=32 * GB):
+                got = self.run_with(self.patches(paused=paused, mem={"a": gb, "b": 3}), lambda: job.relieve(jobs))
+            self.assertEqual((got, k.called), (want, want == "kill"))
+
 
 
 class Plan(unittest.TestCase):

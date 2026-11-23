@@ -43,6 +43,7 @@ START_GB = 2.0  # free memory (after the margin) that a new job needs, or half o
 YOUNG_S = 60  # a job this young has not grown yet: half of its hint still counts as used
 LOW_FRAC = 0.05  # the watcher acts when MemAvailable is below this share of RAM (at least 2 GB) ...
 PSI_ACT = 5.0  # ... or when memory pressure (full avg10, percent) is above this, for HOT_S
+PSI_ROOM = 3  # ... but not while MemAvailable is above this many times the low mark (15% of RAM)
 HOT_S = 6
 ACT_GAP_S = 15  # time between two watcher actions, to see the effect of the first
 CALM_S = 30  # memory must be calm this long before a paused job resumes
@@ -326,7 +327,8 @@ def relieve(jobs):
                     "of the project that used the most memory. It was not started again. Use a host with room "
                     "('job where')." % (mem / GB))
         return "kill"
-    if len(order) == 1 and (m.get("pauses") or 0) >= 2:
+    others = [o for o in jobs if o.get("state") == "run" and o["id"] != m["id"]]
+    if not others and (m.get("pauses") or 0) >= 2 and mem >= 0.25 * total_ram():
         kill_job(m, "it is the only job here and it filled the memory 3 times (%.1f GB now). It was not started "
                     "again. Use a host with more memory or make the job smaller." % (mem / GB))
         return "kill"
@@ -369,7 +371,11 @@ def cmd_watch(a):
             av, psi = available(), mem_pressure()
             lim = cg_int(CG / PARENT / "memory.max")
             near = bool(lim and cg_anon(CG / PARENT) > 0.9 * lim)
-            if av < low or psi > PSI_ACT or near:
+            # Pressure counts only when the host is also low on memory. With much memory available, the pressure
+            # comes from one job at its own cap or from a resumed job that reads its memory back from swap. A pause
+            # gives no relief there: it moves more memory to swap and makes more pressure.
+            roomy = av > PSI_ROOM * low
+            if av < low or (psi > PSI_ACT and not roomy) or near:
                 hot, calm = hot or now(), None
                 urgent = av < low / 2 or near  # near: the jobs are close to the slice cap, where the kernel kills
                 if now() - hot >= (0 if urgent else HOT_S) and now() - acted >= (4 if urgent else ACT_GAP_S):
@@ -377,7 +383,7 @@ def cmd_watch(a):
                         acted = now()
             else:
                 hot = None
-                if av - margin() > 0 and psi < 1:
+                if av - margin() > 0 and (psi < 1 or roomy):
                     calm = calm or now()
                     if now() - calm >= CALM_S and now() - acted >= ACT_GAP_S and resume_one(all_jobs()):
                         acted = now()
