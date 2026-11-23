@@ -47,6 +47,7 @@ PSI_ROOM = 3  # ... but not while MemAvailable is above this many times the low 
 HOT_S = 6
 ACT_GAP_S = 15  # time between two watcher actions, to see the effect of the first
 CALM_S = 30  # memory must be calm this long before a paused job resumes
+STUCK_S = 1800  # a paused job alone on the host whose swap cannot fit in free memory is killed after this long
 IMMUNE_S = 300  # a resumed job is not paused again for this long, if another job can be
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
@@ -343,14 +344,23 @@ def relieve(jobs):
 
 
 def resume_one(jobs):
-    """Resume the oldest paused job if its swapped memory fits in the free memory now."""
+    """Resume the oldest paused job if its swapped memory fits in the free memory now. When no other job runs, no job
+    can free memory for it and the door stays shut while it is paused: then it resumes when its swap fits without the
+    margin (the watcher pauses or kills it if it fills the host again), and a job whose swap cannot fit at all is
+    killed after STUCK_S (alphas-1, Nov 23: 7.3 GB in swap, 9.6 GB available, frozen 8 h, 12 jobs queued)."""
     paused = sorted((m for m in jobs if is_paused(m)), key=lambda m: m.get("started") or 0)
     if not paused:
         return False
     m = paused[0]
     cg = unit_cgroup(m)
-    back = (cg_int(cg / "memory.swap.current") or 0) + START_GB * GB
-    if available() - margin() < back:
+    swapped = cg_int(cg / "memory.swap.current") or 0
+    alone = not [o for o in jobs if o.get("state") == "run" and o["id"] != m["id"] and not is_paused(o)]
+    if available() < swapped + (0 if alone else margin() + START_GB * GB):
+        if alone and now() - (m.get("paused") or now()) > STUCK_S:
+            kill_job(m, "it was paused and could not resume: %.1f GB of it is in swap, only %.1f GB is free with no "
+                        "other job here. It was not started again. Use a host with more memory ('job where') or make "
+                        "the job smaller." % (swapped / GB, available() / GB))
+            return True
         return False
     cg_write(cg / "cgroup.freeze", 0)
     cg_write(cg / "memory.swap.max", "%d" % int((m.get("swap_gb") or 1) * GB))
