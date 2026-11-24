@@ -102,7 +102,7 @@ memory. A paused job is frozen and a part of its memory goes to swap; it resumes
 memory is free again. No new job starts while a job is paused. A job is killed only when a pause cannot help (swap is
 full, one job alone fills the host, or it was paused 12 times), and a killed job is never started again. --no-pause
 protects a service or a job that holds a lock others need. --first is for a project's daily pipeline: a paused job
-does not keep it waiting (it still needs free memory), and it is paused last.
+does not keep it waiting (it still needs free memory), no other job starts while it waits, and it is paused last.
 All jobs together stay under the cap of agentjobs.slice, so services and SSH keep their memory.
 jobs/prove.py fills a host on purpose and measures that nothing outside the jobs stalls.
 
