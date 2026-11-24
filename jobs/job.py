@@ -1365,6 +1365,9 @@ def main():
     wh = sp.add_parser("where")
     wh.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    if a.sub in ("ls", "where", "logs", "room") and hasattr(signal, "SIGPIPE"):
+        # "job ls | head" closed the pipe and printed a BrokenPipeError traceback (alphas workers, Nov 24)
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     {"run": cmd_run, "ls": cmd_ls, "logs": cmd_logs, "wait": cmd_wait, "stop": cmd_stop, "install": cmd_install,
      "room": cmd_room, "where": cmd_where, "_watch": cmd_watch, "_peers": cmd_peers,
      "_supervise": lambda a: supervise(a.id), "_requeue": cmd_requeue}[a.sub](a)
