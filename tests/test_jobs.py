@@ -57,6 +57,8 @@ class Measured(unittest.TestCase):
                 p.stop()
 
     def test_door_uses_half_of_the_hint_and_at_least_start_gb(self):
+        self.assertFalse(self.run_with(self.patches(free=5), lambda: job.door({"peak_given": 1, "peak_known": 6.6}, []))[0])  # known size wins
+        self.assertTrue(self.run_with(self.patches(free=7), lambda: job.door({"peak_given": 40, "peak_known": 6.6}, []))[0])
         self.assertTrue(self.run_with(self.patches(free=2.5), lambda: job.door({"peak_given": 4}, []))[0])
         self.assertFalse(self.run_with(self.patches(free=2.5), lambda: job.door({"peak_given": 8}, []))[0])
         self.assertFalse(self.run_with(self.patches(free=1.5), lambda: job.door({}, []))[0])

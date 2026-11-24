@@ -279,7 +279,7 @@ def free_now(jobs, skip=None):
         r = min(r, lim - cg_anon(CG / PARENT))
     for m in jobs:
         if m.get("state") == "run" and m.get("id") != skip and now() - (m.get("started") or 0) < YOUNG_S:
-            r -= max(0, (m.get("peak_given") or START_GB) * GB / 2 - job_mem(m))
+            r -= max(0, need_gb(m) * GB - job_mem(m))
         if m.get("state") == "run" and m.get("id") != skip and m.get("unit") and not is_paused(m) \
                 and now() - (m.get("resumed") or 0) < READBACK_S:
             # a resumed job reads its swap back into memory (alphas-1 Nov 23: 4 queued jobs started beside a job
@@ -288,6 +288,12 @@ def free_now(jobs, skip=None):
             # 7 jobs queued)
             r -= cg_int(unit_cgroup(m) / "memory.swap.current") or 0
     return r
+
+
+def need_gb(m):
+    """GB of free memory that a job needs at the door: the measured peak of earlier runs of this kind of job when
+    there is one (the job is known), else half of the --peak-gb hint (hints are rough). At least START_GB."""
+    return max(START_GB, float(m.get("peak_known") or 0) or float(m.get("peak_given") or 0) / 2)
 
 
 def door(me, jobs):
@@ -302,10 +308,11 @@ def door(me, jobs):
     if st and swap_free() < max(4 * GB, SWAP_DOOR * st):
         # tingbox Nov 23: 105 jobs, 54 of 55 GB swap used, 7 jobs killed in 1 h because no job could be paused
         return False, "swap is almost full (%.1f GB free)" % (swap_free() / GB)
-    need = max(START_GB, (me.get("peak_given") or 0) / 2) * GB
+    need = need_gb(me) * GB
     free = free_now(jobs, me.get("id"))
     if free < need:
-        return False, "%.1f GB is free, this job needs %.1f GB to start" % (max(0, free) / GB, need / GB)
+        return False, "%.1f GB is free, this job needs %.1f GB to start%s" % (
+            max(0, free) / GB, need / GB, " (earlier runs of this kind of job used that much)" if me.get("peak_known") else "")
     return True, ""
 
 
@@ -765,7 +772,9 @@ def cmd_run(a):
         mem_gb = min(mem_gb or lim_gb, round(lim_gb, 1))
     if SYS == "Linux":
         mem_gb = mem_gb or round(total_ram() / GB, 1)
-        ok, why = door({"peak_given": given}, all_jobs())
+        jobs = all_jobs()
+        known = history_peak(project, name, jobs)[0]  # a known kind of job needs its measured peak, not a guess
+        ok, why = door({"peak_given": given, "peak_known": known}, jobs)
         if not ok and not a.queue:
             print("job run: %s is full: %s. The job did NOT start. Use another host ('job where' shows the room on "
                   "each host), or add --queue to wait here." % (platform.node(), why), file=sys.stderr)
@@ -793,6 +802,8 @@ def cmd_run(a):
     m = {"id": jid, "name": name, "project": project, "owner": owner, "host": platform.node(), "os": SYS, "cmd": cmd,
          "cwd": cwd, "peak_gb": a.peak_gb, "mem_gb": mem_gb, "swap_gb": a.swap_gb, "state": "queued", "created": now(),
          "peak_given": given, "cpus": a.cpus, "user": os.environ.get("USER") or os.environ.get("USERNAME") or "", "version": 1}
+    if SYS == "Linux" and known:
+        m["peak_known"] = known
     if a.no_pause:
         m["no_pause"] = True
     log = d / "job.log"
