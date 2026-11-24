@@ -65,6 +65,9 @@ class Measured(unittest.TestCase):
 
     def test_door_is_closed_while_a_job_is_paused_or_pressure_is_high(self):
         self.assertFalse(self.run_with(self.patches(paused=("a",)), lambda: job.door({}, [{"id": "a", "state": "run"}]))[0])
+        self.assertTrue(self.run_with(self.patches(paused=("a",)), lambda: job.door({"first": True}, [{"id": "a", "state": "run"}]))[0])
+        self.assertFalse(self.run_with(self.patches(paused=("a",), free=1.5),
+                                       lambda: job.door({"first": True}, [{"id": "a", "state": "run"}]))[0])
         for avail, is_open in ((4, False), (20, True)):  # pressure closes the door only when the host is also low on memory
             with mock.patch.object(job, "available", return_value=avail * GB), mock.patch.object(job, "total_ram", return_value=64 * GB):
                 self.assertEqual(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0], is_open)
@@ -97,10 +100,11 @@ class Measured(unittest.TestCase):
         jobs = [{"id": "old", "state": "run", "project": "big", "started": t - 9000}, {"id": "new", "state": "run", "project": "big", "started": t - 60},
                 {"id": "other", "state": "run", "project": "small", "started": t - 5}, {"id": "tiny", "state": "run", "project": "big", "started": t - 1},
                 {"id": "svc", "state": "run", "project": "big", "started": t - 2, "no_pause": True},
-                {"id": "back", "state": "run", "project": "big", "started": t - 3, "resumed": t - 10}]
-        mem = {"old": 8, "new": 4, "other": 6, "tiny": 0.1, "svc": 9, "back": 5}
+                {"id": "back", "state": "run", "project": "big", "started": t - 3, "resumed": t - 10},
+                {"id": "daily", "state": "run", "project": "big", "started": t - 4, "first": True}]
+        mem = {"old": 8, "new": 4, "other": 6, "tiny": 0.1, "svc": 9, "back": 5, "daily": 3}
         order = self.run_with(self.patches(mem=mem), lambda: [m["id"] for m in job.victims(jobs)])
-        self.assertEqual(order, ["new", "old", "other", "back"])
+        self.assertEqual(order, ["new", "old", "other", "back", "daily"])
 
     def test_relieve_pauses_and_kills_only_when_swap_is_full(self):
         t = job.now()

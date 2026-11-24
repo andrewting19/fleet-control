@@ -298,9 +298,10 @@ def need_gb(m):
 
 
 def door(me, jobs):
-    """(open, reason). The door for a new job on Linux. It looks only at measured values."""
+    """(open, reason). The door for a new job on Linux. It looks only at measured values. A paused job keeps it shut
+    (the room is for its resume), except for a --first job, which still needs free memory."""
     paused = [m for m in jobs if is_paused(m)]
-    if paused:
+    if paused and not me.get("first"):
         return False, "%d job%s paused here because memory is short" % (len(paused), " is" if len(paused) == 1 else "s are")
     low = max(2 * GB, LOW_FRAC * total_ram())
     if mem_pressure() > PSI_FULL_MAX and available() <= PSI_ROOM * low:  # same rule as the watcher
@@ -329,7 +330,7 @@ def watch_log(m, text):
 def victims(jobs):
     """Jobs that can be paused, best choice first: the project that uses the most job memory first, and in a project
     the youngest job first. Jobs below SMALL_VICTIM and jobs with --no-pause are never chosen. A job that resumed
-    less than IMMUNE_S ago comes after all others."""
+    less than IMMUNE_S ago comes after all others, and a --first job after those."""
     c = [m for m in jobs if m.get("state") == "run" and not is_paused(m) and not m.get("no_pause")]
     for m in c:
         m["_mem"] = job_mem(m)
@@ -337,7 +338,8 @@ def victims(jobs):
     use = {}
     for m in c:
         use[m.get("project")] = use.get(m.get("project"), 0) + m["_mem"]
-    return sorted(c, key=lambda m: (now() - (m.get("resumed") or 0) <= IMMUNE_S, -use[m.get("project")], -(m.get("started") or 0)))
+    return sorted(c, key=lambda m: (bool(m.get("first")), now() - (m.get("resumed") or 0) <= IMMUNE_S,
+                                    -use[m.get("project")], -(m.get("started") or 0)))
 
 
 def kill_job(m, why):
@@ -793,7 +795,7 @@ def cmd_run(a):
         mem_gb = mem_gb or round(total_ram() / GB, 1)
         jobs = all_jobs()
         known = history_peak(project, name, jobs)[0]  # a known kind of job needs its measured peak, not a guess
-        ok, why = door({"peak_given": given, "peak_known": known}, jobs)
+        ok, why = door({"peak_given": given, "peak_known": known, "first": a.first}, jobs)
         if not ok and not a.queue:
             print("job run: %s is full: %s. The job did NOT start. Use another host ('job where' shows the room on "
                   "each host), or add --queue to wait here." % (platform.node(), why), file=sys.stderr)
@@ -825,6 +827,8 @@ def cmd_run(a):
         m["peak_known"] = known
     if a.no_pause:
         m["no_pause"] = True
+    if a.first:
+        m["first"] = True
     log = d / "job.log"
     log.touch()
     if SYS == "Linux":
@@ -1350,6 +1354,8 @@ def main():
     r.add_argument("--queue", action="store_true", help="Linux: when the host is full, wait here (default: exit 75, job not started)")
     r.add_argument("--no-pause", action="store_true", help="Linux: never pause or kill this job for memory (services; "
                    "jobs that hold a lock or a connection that others need)")
+    r.add_argument("--first", action="store_true", help="Linux: a paused job does not keep this job waiting, and it is "
+                   "paused last (a project's daily pipeline; it still needs free memory)")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     l = sp.add_parser("ls")
     l.add_argument("--json", action="store_true")
