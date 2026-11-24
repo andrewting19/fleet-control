@@ -148,6 +148,20 @@ class Resume(unittest.TestCase):
         self.assertEqual(self.go(job.STUCK_S + 1, 4, others=False), "kill")
         self.assertEqual(self.go(60, 5.5, others=False), "resume")
 
+    def test_a_younger_job_that_fits_resumes_before_an_older_one_that_does_not(self):
+        """alphas-1, Nov 24: 6.3 GB and 2.1 GB jobs paused 26-34 min beside small jobs, 3.6 GB available."""
+        def go(waited):
+            jobs = [{"id": "big", "state": "run", "unit": "u1", "slice": "s", "paused": 10000 - waited, "started": 1},
+                    {"id": "small", "state": "run", "unit": "u2", "slice": "s", "paused": 10000 - waited, "started": 2},
+                    {"id": "o", "state": "run", "unit": "u3", "slice": "s", "started": 3}]
+            swap = {"big": 5.0, "small": 1.8, "o": 0}
+            with mock.patch.object(job, "now", return_value=10000),                     mock.patch.object(job, "is_paused", side_effect=lambda m: m["id"] in ("big", "small")),                     mock.patch.object(job, "unit_cgroup", side_effect=lambda m: Path("/cg") / m["id"]),                     mock.patch.object(job, "cg_int", side_effect=lambda p: int(swap[p.parent.name] * GB)),                     mock.patch.object(job, "available", return_value=int(3.6 * GB)),                     mock.patch.object(job, "margin", return_value=3 * GB), mock.patch.object(job, "cg_write") as w,                     mock.patch.object(job, "kill_job") as k, mock.patch.object(job, "update") as u,                     mock.patch.object(job, "watch_log"), mock.patch.object(job, "event"):
+                job.resume_one(jobs)
+            return [c.args[0] for c in u.call_args_list], k.called, w.called
+        self.assertEqual(go(600), ([], False, False))  # both need the margin
+        self.assertEqual(go(job.STUCK_S + 1), (["small"], False, True))
+        self.assertEqual(go(4 * job.STUCK_S + 1)[0], ["small"])  # the one that fits resumes; nothing is killed
+
 
 class Plan(unittest.TestCase):
     def test_room_holds_the_largest_regrowth_and_a_share_of_the_others(self):

@@ -414,35 +414,40 @@ def relieve(jobs, cause="", short=True):
 
 
 def resume_one(jobs):
-    """Resume the oldest paused job if its swapped memory fits in the free memory now, with the margin. The door
-    stays shut while a job is paused, so a pause must end: when no other job runs or after STUCK_S, the job resumes
-    as soon as its swap fits without the margin (the watcher pauses it again if it fills the host). A job whose
-    swap cannot fit is killed (alphas-1, Nov 23: 7.3 GB in swap, 9.6 GB available, frozen 8 h, 12 jobs queued)."""
+    """Resume the oldest paused job whose swapped memory fits in the free memory now, with the margin. The door
+    stays shut while a job is paused, so a pause must end: when no other job runs or after STUCK_S, a job resumes
+    as soon as its swap fits without the margin (the watcher pauses it again if it fills the host). A younger job
+    that fits resumes before an older one that does not (alphas-1, Nov 24: a 6.3 GB and a 2.1 GB job paused 34 min,
+    3.6 GB available; only the older one was tried, so neither resumed). When none fits, the oldest that waited too
+    long is killed (alphas-1, Nov 23: 7.3 GB in swap, 9.6 GB available, frozen 8 h, 12 jobs queued)."""
     paused = sorted((m for m in jobs if is_paused(m)), key=lambda m: m.get("started") or 0)
-    if not paused:
+    stuck = []
+    for m in paused:
+        cg = unit_cgroup(m)
+        swapped = cg_int(cg / "memory.swap.current") or 0
+        alone = not [o for o in jobs if o.get("state") == "run" and o["id"] != m["id"] and not is_paused(o)]
+        waited = now() - (m.get("paused") or now())
+        # The margin is not needed when no other job runs, and not after STUCK_S: the door is shut while a job is
+        # paused, so a long pause blocks every new job (alphas-1, Nov 24: 5.3 GB in swap, 6.5 GB available, 9 small
+        # long jobs beside it, paused 2 h, 16 jobs queued).
+        spare = 0 if alone or waited > STUCK_S else margin() + START_GB * GB
+        if available() < swapped + spare:
+            if waited > (STUCK_S if alone else 4 * STUCK_S):
+                stuck.append((m, swapped, alone))
+            continue
+        cg_write(cg / "cgroup.freeze", 0)
+        cg_write(cg / "memory.swap.max", "%d" % int((m.get("swap_gb") or 1) * GB))
+        t = m.get("paused") or now()
+        update(m["id"], paused=None, resumed=now(), paused_s=(m.get("paused_s") or 0) + now() - t)
+        watch_log(m, "resumed after %.0f s" % (now() - t))
+        event("resume", m, paused_s=round(now() - t))
+        return True
+    if not stuck:
         return False
-    m = paused[0]
-    cg = unit_cgroup(m)
-    swapped = cg_int(cg / "memory.swap.current") or 0
-    alone = not [o for o in jobs if o.get("state") == "run" and o["id"] != m["id"] and not is_paused(o)]
-    waited = now() - (m.get("paused") or now())
-    # The margin is not needed when no other job runs, and not after STUCK_S: the door is shut while a job is
-    # paused, so a long pause blocks every new job (alphas-1, Nov 24: 5.3 GB in swap, 6.5 GB available, 9 small
-    # long jobs beside it, paused 2 h, 16 jobs queued).
-    spare = 0 if alone or waited > STUCK_S else margin() + START_GB * GB
-    if available() < swapped + spare:
-        if waited > (STUCK_S if alone else 4 * STUCK_S):
-            kill_job(m, "it was paused and could not resume: %.1f GB of it is in swap, only %.1f GB is free%s. It "
-                        "was not started again. Use a host with more memory ('job where') or make the job smaller."
-                     % (swapped / GB, available() / GB, " with no other job here" if alone else ""))
-            return True
-        return False
-    cg_write(cg / "cgroup.freeze", 0)
-    cg_write(cg / "memory.swap.max", "%d" % int((m.get("swap_gb") or 1) * GB))
-    t = m.get("paused") or now()
-    update(m["id"], paused=None, resumed=now(), paused_s=(m.get("paused_s") or 0) + now() - t)
-    watch_log(m, "resumed after %.0f s" % (now() - t))
-    event("resume", m, paused_s=round(now() - t))
+    m, swapped, alone = stuck[0]
+    kill_job(m, "it was paused and could not resume: %.1f GB of it is in swap, only %.1f GB is free%s. It "
+                "was not started again. Use a host with more memory ('job where') or make the job smaller."
+             % (swapped / GB, available() / GB, " with no other job here" if alone else ""))
     return True
 
 
