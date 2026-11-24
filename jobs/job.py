@@ -52,6 +52,7 @@ IMMUNE_S = 300  # a resumed job is not paused again for this long, if another jo
 READBACK_S = 600  # a resumed job reads the memory that it needs back from swap in this time; what stays in swap after is cold
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
+MAX_PAUSES = 12  # a job due for this pause is killed: the host cannot hold it, and its pauses keep the door shut
 SWAP_DOOR = 0.1  # no new job starts when less than this share of the swap is free (at least 4 GB): pauses need swap
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
 CPU_X = float(os.environ.get("AGENTJOBS_CPU_X") or 2.0)  # a job is sent to another host when the load is above this times the cores ...
@@ -382,7 +383,7 @@ def relieve(jobs, cause="", short=True):
     """Memory is short now. Pause the first job of victims() and move as much of its memory to swap as the swap can
     take (SWAP_KEEP stays free). A paused job stops growing and stops using its memory, so a part is enough.
     Kill only when a pause cannot help: swap is full, or the job is the only one here and it filled the host
-    again after 2 pauses. A killed job is never started again."""
+    again after 2 pauses, or it was paused MAX_PAUSES times. A killed job is never started again."""
     order = victims(jobs)
     if not order:
         return None
@@ -398,6 +399,14 @@ def relieve(jobs, cause="", short=True):
     if not others and (m.get("pauses") or 0) >= 2 and mem >= 0.25 * total_ram():
         kill_job(m, "it is the only job here and it filled the memory 3 times (%.1f GB now). It was not started "
                     "again. Use a host with more memory or make the job smaller." % (mem / GB))
+        return "kill"
+    if (m.get("pauses") or 0) >= MAX_PAUSES - 1:
+        # alphas-1, Nov 24: two archive jobs of 3 and 6 GB took turns (25 and 7 pauses in 7 h); while one of them
+        # was paused, no new job started, and 19 jobs waited up to 9 h. On 3 hosts, no job paused 4-9 times failed.
+        kill_job(m, "memory was short again and it was paused %d times before (%.1f GB now): this host cannot "
+                    "hold it beside the other jobs, and no new job starts here while a job is paused. It was not "
+                    "started again. Use a host with room ('job where') or make the job smaller."
+                 % (m.get("pauses") or 0, mem / GB))
         return "kill"
     with Lock():  # a supervisor that updates its record holds no lock while we freeze it
         if not cg_write(cg / "cgroup.freeze", 1):

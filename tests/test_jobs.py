@@ -126,6 +126,17 @@ class Measured(unittest.TestCase):
                 got = self.run_with(self.patches(paused=paused, mem={"a": gb, "b": 3}), lambda: job.relieve(jobs))
             self.assertEqual((got, k.called), (want, want == "kill"))
 
+    def test_relieve_kills_a_job_due_for_its_twelfth_pause(self):
+        t = job.now()
+        for pauses, want in ((10, "pause"), (11, "kill")):
+            jobs = [{"id": "a", "state": "run", "project": "p", "started": t - 60, "unit": "u", "slice": "s",
+                     "pauses": pauses},
+                    {"id": "b", "state": "run", "project": "q", "started": t - 600, "unit": "u2", "slice": "s"}]
+            with mock.patch.object(job, "cg_write", return_value=True), mock.patch.object(job, "kill_job") as k, \
+                    mock.patch.object(job, "update"), mock.patch.object(job, "watch_log"), mock.patch.object(job, "Lock"):
+                got = self.run_with(self.patches(mem={"a": 3, "b": 0.1}), lambda: job.relieve(jobs))
+            self.assertEqual((got, k.called), (want, want == "kill"))
+
 
 
 class Resume(unittest.TestCase):
