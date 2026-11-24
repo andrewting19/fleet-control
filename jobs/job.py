@@ -399,7 +399,9 @@ def relieve(jobs, cause="", short=True):
     watch_log(m, "paused: host memory is short (%sthis job holds %.1f GB). It resumes automatically." % (cause and cause + "; ", mem / GB))
     event("pause", m, cause=cause, mem_gb=round(mem / GB, 1))
     cg_write(cg / "memory.swap.max", "max")
-    if space >= 1 * GB:  # with full swap and only pressure (memory is still available), the freeze alone must do
+    if space >= 1 * GB and short:
+        # Only pressure, memory is still available: the freeze alone must do. A move of the job to swap and back
+        # was the main swap traffic on tingbox on Nov 24 (the same jobs paused each 5 minutes, 4 to 6 GB each time).
         cg_write(cg / "memory.reclaim", "%d" % min(mem, space))  # a partial result is fine
     return "pause"
 
