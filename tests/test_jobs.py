@@ -128,6 +128,27 @@ class Measured(unittest.TestCase):
 
 
 
+class Resume(unittest.TestCase):
+    def go(self, waited, avail, swapped=5.3, others=True):
+        """resume_one for a job paused 'waited' s ago with 'swapped' GB in swap. Returns 'resume', 'kill' or 'wait'."""
+        j = {"id": "p", "state": "run", "unit": "u", "slice": "s", "paused": 10000 - waited, "started": 1}
+        jobs = [j] + ([{"id": "o", "state": "run", "unit": "v", "slice": "s", "started": 2}] if others else [])
+        with mock.patch.object(job, "now", return_value=10000), mock.patch.object(job, "is_paused", side_effect=lambda m: m["id"] == "p"),                 mock.patch.object(job, "cg_int", return_value=int(swapped * GB)), mock.patch.object(job, "available", return_value=int(avail * GB)),                 mock.patch.object(job, "margin", return_value=3 * GB), mock.patch.object(job, "cg_write") as w,                 mock.patch.object(job, "kill_job") as k, mock.patch.object(job, "update"), mock.patch.object(job, "watch_log"),                 mock.patch.object(job, "event"):
+            got = job.resume_one(jobs)
+        return "kill" if k.called else "resume" if got and w.called else "wait"
+
+    def test_margin_is_kept_at_first_and_dropped_after_a_long_pause(self):
+        self.assertEqual(self.go(600, 6.5), "wait")  # needs 5.3 + 3 + 2
+        self.assertEqual(self.go(600, 10.5), "resume")
+        self.assertEqual(self.go(job.STUCK_S + 1, 6.5), "resume")  # alphas-1, Nov 24: was paused 2 h beside small jobs
+
+    def test_a_job_that_can_never_fit_is_killed_late_when_other_jobs_run(self):
+        self.assertEqual(self.go(job.STUCK_S + 1, 4), "wait")
+        self.assertEqual(self.go(4 * job.STUCK_S + 1, 4), "kill")
+        self.assertEqual(self.go(job.STUCK_S + 1, 4, others=False), "kill")
+        self.assertEqual(self.go(60, 5.5, others=False), "resume")
+
+
 class Plan(unittest.TestCase):
     def test_room_holds_the_largest_regrowth_and_a_share_of_the_others(self):
         t = job.now()

@@ -47,7 +47,7 @@ PSI_ROOM = 3  # ... but not while MemAvailable is above this many times the low 
 HOT_S = 6
 ACT_GAP_S = 15  # time between two watcher actions, to see the effect of the first
 CALM_S = 30  # memory must be calm this long before a paused job resumes
-STUCK_S = 1800  # a paused job alone on the host whose swap cannot fit in free memory is killed after this long
+STUCK_S = 1800  # a job paused this long resumes without the margin; if its swap cannot fit in free memory it is killed (alone: now; else after 4x)
 IMMUNE_S = 300  # a resumed job is not paused again for this long, if another job can be
 READBACK_S = 600  # a resumed job reads the memory that it needs back from swap in this time; what stays in swap after is cold
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
@@ -414,10 +414,10 @@ def relieve(jobs, cause="", short=True):
 
 
 def resume_one(jobs):
-    """Resume the oldest paused job if its swapped memory fits in the free memory now. When no other job runs, no job
-    can free memory for it and the door stays shut while it is paused: then it resumes when its swap fits without the
-    margin (the watcher pauses or kills it if it fills the host again), and a job whose swap cannot fit at all is
-    killed after STUCK_S (alphas-1, Nov 23: 7.3 GB in swap, 9.6 GB available, frozen 8 h, 12 jobs queued)."""
+    """Resume the oldest paused job if its swapped memory fits in the free memory now, with the margin. The door
+    stays shut while a job is paused, so a pause must end: when no other job runs or after STUCK_S, the job resumes
+    as soon as its swap fits without the margin (the watcher pauses it again if it fills the host). A job whose
+    swap cannot fit is killed (alphas-1, Nov 23: 7.3 GB in swap, 9.6 GB available, frozen 8 h, 12 jobs queued)."""
     paused = sorted((m for m in jobs if is_paused(m)), key=lambda m: m.get("started") or 0)
     if not paused:
         return False
@@ -425,11 +425,16 @@ def resume_one(jobs):
     cg = unit_cgroup(m)
     swapped = cg_int(cg / "memory.swap.current") or 0
     alone = not [o for o in jobs if o.get("state") == "run" and o["id"] != m["id"] and not is_paused(o)]
-    if available() < swapped + (0 if alone else margin() + START_GB * GB):
-        if alone and now() - (m.get("paused") or now()) > STUCK_S:
-            kill_job(m, "it was paused and could not resume: %.1f GB of it is in swap, only %.1f GB is free with no "
-                        "other job here. It was not started again. Use a host with more memory ('job where') or make "
-                        "the job smaller." % (swapped / GB, available() / GB))
+    waited = now() - (m.get("paused") or now())
+    # The margin is not needed when no other job runs, and not after STUCK_S: the door is shut while a job is
+    # paused, so a long pause blocks every new job (alphas-1, Nov 24: 5.3 GB in swap, 6.5 GB available, 9 small
+    # long jobs beside it, paused 2 h, 16 jobs queued).
+    spare = 0 if alone or waited > STUCK_S else margin() + START_GB * GB
+    if available() < swapped + spare:
+        if waited > (STUCK_S if alone else 4 * STUCK_S):
+            kill_job(m, "it was paused and could not resume: %.1f GB of it is in swap, only %.1f GB is free%s. It "
+                        "was not started again. Use a host with more memory ('job where') or make the job smaller."
+                     % (swapped / GB, available() / GB, " with no other job here" if alone else ""))
             return True
         return False
     cg_write(cg / "cgroup.freeze", 0)
