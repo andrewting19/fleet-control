@@ -13,7 +13,8 @@ queue, and several of them can push a machine into swap thrashing. Each job here
   - outlives the shell (Linux: a systemd unit; macOS/Windows: a detached supervisor),
   - waits until the machine has --peak-gb of free memory (admission; first come first served, with backfill),
   - is stopped at --mem-gb (Linux: cgroup MemoryMax; Windows: Job Object; macOS: RSS watchdog),
-  - runs at low CPU priority, and is killed before services when memory runs out (oom_score_adj 500),
+  - runs at low CPU priority, and is killed before services when memory runs out (oom_score_adj 500; while the
+    watcher pauses it, 250: earlyoom and the kernel then stop running jobs first),
   - records owner (CODEX_THREAD_ID or --owner), project, command, exit code and peak memory in ~/.agentjobs/ID/.
 Linux jobs go to agentjobs-<project>.slice under agentjobs.slice; 'job install' caps that parent slice, so all
 agent jobs together cannot take the memory of services. Only jobs of this tool reserve memory: there is no
@@ -52,6 +53,7 @@ IMMUNE_S = 300  # a resumed job is not paused again for this long, if another jo
 READBACK_S = 600  # a resumed job reads the memory that it needs back from swap in this time; what stays in swap after is cold
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
+PAUSED_ADJ = 250  # oom_score_adj of a paused job: after running jobs (500), before services (0)
 MAX_PAUSES = 12  # a job due for this pause is killed: the host cannot hold it, and its pauses keep the door shut
 SWAP_DOOR = 0.1  # no new job starts when less than this share of the swap is free (at least 4 GB): pauses need swap
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
@@ -271,6 +273,44 @@ def is_paused(m):
         return False
 
 
+def job_pids(m):
+    """Process ids in the cgroup of a running job, as strings."""
+    try:
+        return (unit_cgroup(m) / "cgroup.procs").read_text().split()
+    except OSError:
+        return []
+
+
+def oom_adj(pids):
+    """{pid: oom_score_adj} of the processes that still exist."""
+    out = {}
+    for pid in pids:
+        try:
+            out[pid] = int(Path("/proc/%s/oom_score_adj" % pid).read_text())
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def set_oom_adj(values):
+    """Write {pid: oom_score_adj} as root (a lower value needs CAP_SYS_RESOURCE). A pid that ended is skipped."""
+    if not values:
+        return
+    if os.geteuid() == 0:
+        for pid, adj in values.items():
+            try:
+                Path("/proc/%s/oom_score_adj" % pid).write_text(str(adj))
+            except OSError:
+                pass
+        return
+    args = [x for pid, adj in values.items() for x in (str(pid), str(adj))]
+    try:  # one sudo call for all processes
+        subprocess.run(["sudo", "-n", "sh", "-c", 'while [ $# -gt 1 ]; do echo "$2" > "/proc/$1/oom_score_adj"; shift 2; done',
+                        "sh"] + args, capture_output=True, text=True, timeout=60)
+    except subprocess.SubprocessError:
+        pass
+
+
 def free_now(jobs, skip=None):
     """Bytes free for a new job now: MemAvailable minus the margin, inside the slice cap, minus half of the hint of
     each job that started in the last YOUNG_S (it has not grown yet)."""
@@ -418,6 +458,16 @@ def relieve(jobs, cause="", short=True):
         if not cg_write(cg / "cgroup.freeze", 1):
             return None
         update(m["id"], paused=now(), pauses=(m.get("pauses") or 0) + 1)
+    # A frozen job cannot grow, so earlyoom and the kernel must stop a running job first (mi-box, Nov 24 15:31-15:33:
+    # earlyoom stopped 2 jobs that the watcher had frozen 6 min before, one of 13.7 GB, beside running jobs). The old
+    # values are kept in their own file (a supervisor frozen in an update can write an old meta.json back) and come
+    # back at the resume.
+    lowered = {pid: adj for pid, adj in oom_adj(job_pids(m)).items() if adj > PAUSED_ADJ}
+    try:
+        (STATE / m["id"] / "paused_oom_adj.json").write_text(json.dumps(lowered))
+        set_oom_adj({pid: PAUSED_ADJ for pid in lowered})
+    except OSError:
+        pass
     watch_log(m, "paused: host memory is short (%sthis job holds %.1f GB). It resumes automatically." % (cause and cause + "; ", mem / GB))
     event("pause", m, cause=cause, mem_gb=round(mem / GB, 1))
     cg_write(cg / "memory.swap.max", "max")
@@ -450,6 +500,18 @@ def resume_one(jobs):
             if waited > (STUCK_S if alone else 4 * STUCK_S):
                 stuck.append((m, swapped, alone))
             continue
+        saved = STATE / m["id"] / "paused_oom_adj.json"
+        try:
+            lowered = json.loads(saved.read_text())
+        except (OSError, ValueError):
+            lowered = {}
+        # only processes still in the job: the pid of a process that died while frozen can belong to another one now
+        pids = job_pids(m)
+        set_oom_adj({pid: adj for pid, adj in lowered.items() if pid in pids})
+        try:
+            saved.unlink()
+        except OSError:
+            pass
         cg_write(cg / "cgroup.freeze", 0)
         cg_write(cg / "memory.swap.max", "%d" % int((m.get("swap_gb") or 1) * GB))
         t = m.get("paused") or now()
