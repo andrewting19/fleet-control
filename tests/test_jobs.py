@@ -391,3 +391,13 @@ class StaleLock(unittest.TestCase):
         with mock.patch.object(job, "LOCK", os.path.join(d, "x.lock")):
             with job.Lock():
                 self.assertEqual(job.lock_gen(), 0)
+
+
+class OomOrder(unittest.TestCase):
+    @unittest.skipIf(job.SYS != "Linux", "/proc oom_score_adj")
+    def test_command_is_stopped_before_its_supervisor(self):
+        import subprocess
+        self.assertLess(job.SUPERVISOR_ADJ, job.PAUSED_ADJ)
+        out = subprocess.run(["cat", "/proc/self/oom_score_adj"], preexec_fn=job.raise_oom_adj,
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(int(out), job.JOB_ADJ)

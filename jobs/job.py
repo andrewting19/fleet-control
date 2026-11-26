@@ -14,7 +14,7 @@ queue, and several of them can push a machine into swap thrashing. Each job here
   - waits until the machine has --peak-gb of free memory (admission; first come first served, with backfill),
   - is stopped at --mem-gb (Linux: cgroup MemoryMax; Windows: Job Object; macOS: RSS watchdog),
   - runs at low CPU priority, and is killed before services when memory runs out (oom_score_adj 500; while the
-    watcher pauses it, 250: earlyoom and the kernel then stop running jobs first),
+    watcher pauses it, 250: earlyoom and the kernel then stop running jobs first; its small supervisor has 0),
   - records owner (CODEX_THREAD_ID or --owner), project, command, exit code and peak memory in ~/.agentjobs/ID/.
 Linux jobs go to agentjobs-<project>.slice under agentjobs.slice; 'job install' caps that parent slice, so all
 agent jobs together cannot take the memory of services. Only jobs of this tool reserve memory: there is no
@@ -54,6 +54,11 @@ READBACK_S = 600  # a resumed job reads the memory that it needs back from swap 
 SMALL_VICTIM = 0.5  # GB; a job below this gives no relief and is never paused
 SWAP_KEEP = 2.0  # GB of swap that a pause never uses
 PAUSED_ADJ = 250  # oom_score_adj of a paused job: after running jobs (500), before services (0)
+JOB_ADJ = 500  # oom_score_adj of a job's command and its children: they are stopped before services
+# The supervisor has the adj of a service. A stop of the supervisor frees no memory (10-60 MB), but it ends the job,
+# and a queued job is only its supervisor (mi-box, Nov 25 15:23 and Nov 26 15:35-15:36: earlyoom stopped 9 such
+# supervisors at adj 500 while the memory was in services; 3 queued Remora jobs were lost).
+SUPERVISOR_ADJ = 0
 MAX_PAUSES = 12  # a job due for this pause is killed: the host cannot hold it, and its pauses keep the door shut
 SWAP_DOOR = 0.1  # no new job starts when less than this share of the swap is free (at least 4 GB): pauses need swap
 FULL_EXIT = 75  # exit code of 'job run' when the host is full
@@ -946,7 +951,7 @@ def systemd_launch(m):
                 "--uid", str(os.getuid()), "--gid", str(os.getgid()),
                 "-p", "WorkingDirectory=" + m["cwd"], "-p", "EnvironmentFile=" + str(d / "env"),
                 "-p", "MemoryMax=%dM" % int(m["mem_gb"] * 1024), "-p", "MemorySwapMax=%dM" % int(m["swap_gb"] * 1024),
-                "-p", "OOMScoreAdjust=500",
+                "-p", "OOMScoreAdjust=%d" % SUPERVISOR_ADJ,
                 "-p", "StandardOutput=append:" + str(log), "-p", "StandardError=append:" + str(log),
                 sys.executable, SELF, "_supervise", m["id"]]
     return subprocess.run(sr, capture_output=True, text=True)
@@ -1091,9 +1096,20 @@ def supervise(jid):
     print("[job] end %s: %s exit=%s signal=%s peak=%.2f GB %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), st, rc, sig, (peak or 0) / GB, why or ""), flush=True)
 
 
+def raise_oom_adj():
+    """Runs in the job's command before exec: set JOB_ADJ, above the supervisor's SUPERVISOR_ADJ. A higher adj needs
+    no privilege. If /proc cannot be written, the command keeps the supervisor's adj."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write(str(JOB_ADJ))
+    except OSError:
+        pass
+
+
 def posix_run(m):
+    preexec = {"Darwin": lambda: os.nice(10), "Linux": raise_oom_adj}.get(SYS)
     p = subprocess.Popen(m["cmd"], cwd=m["cwd"], start_new_session=True, env=thread_env(m),
-                         preexec_fn=(lambda: os.nice(10)) if SYS == "Darwin" else None)
+                         preexec_fn=preexec)
     update(m["id"], child_pid=p.pid, child_pgid=p.pid)
     m["child_pgid"] = p.pid
 
