@@ -405,3 +405,13 @@ class OomOrder(unittest.TestCase):
         out = subprocess.run(["cat", "/proc/self/oom_score_adj"], preexec_fn=job.raise_oom_adj,
                              capture_output=True, text=True, check=True).stdout
         self.assertEqual(int(out), job.JOB_ADJ)
+
+
+class NameKey(unittest.TestCase):
+    def test_digits_after_a_letter_name_the_job(self):
+        self.assertNotEqual(job.name_key("alphas.sigs.os36_inputs"), job.name_key("alphas.sigs.os58_inputs"))
+
+    def test_dates_ids_and_shards_are_one_kind(self):
+        self.assertEqual(job.name_key("pull-2026-11-27"), job.name_key("pull-2026-11-28"))
+        self.assertEqual(job.name_key("eval_1127-120005"), job.name_key("eval_1128-080102"))
+        self.assertEqual(job.name_key("shard-3"), job.name_key("shard-12"))

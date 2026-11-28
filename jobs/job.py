@@ -223,8 +223,10 @@ def reserved(m):
 
 
 def name_key(name):
-    """Jobs whose names differ only in digits (dates, shard numbers) are the same kind of job."""
-    return re.sub(r"\d+", "#", name or "")
+    """Jobs whose names differ only in dates, ids or shard numbers are the same kind of job: a digit run of 4 or more,
+    or one that does not follow a letter. Digits after a letter name the job (alphas-1, Nov 28: os36_inputs, 0.5 GB,
+    took the 8.17 GB peak of os58_inputs as os#_inputs and waited 56 min for 9 GB)."""
+    return re.sub(r"\d{4,}|(?<![A-Za-z0-9])\d+", "#", name or "")
 
 
 # ---------------------------------------------------------------- Linux: start on real free memory, pause on real pressure
