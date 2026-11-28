@@ -1065,6 +1065,13 @@ def supervise(jid):
     if SYS == "Windows":  # started by WMI with no output handles: write to the job log
         f = open(str(STATE / jid / "job.log"), "a", buffering=1)
         sys.stdout = sys.stderr = f
+    ended = read(jid) or {}
+    if ended.get("ended"):
+        # A restart of the supervisor unit (needrestart after an upgrade: alphas-1, Nov 27 06:33 UTC, 24 jobs) stops
+        # the command, and systemd runs the unit again. The job has ended and job wait has returned: run nothing.
+        print("[job] the supervisor started again after the job ended (%s): the command does not run again"
+              % ended.get("state"), flush=True)
+        return
     m = update(jid, sup_pid=os.getpid())
     if not admit(jid):
         return
@@ -1299,6 +1306,10 @@ def cmd_install(a):
         os.chmod(dst, 0o755)
     subprocess.run(["systemctl", "daemon-reload"], check=True)
     print("agentjobs.slice: MemoryMax=%dG of %.0f GB RAM; %s installed" % (mx, tot, dst))
+    if Path("/etc/needrestart/conf.d").is_dir():
+        # needrestart after an unattended upgrade restarted 24 job supervisors on alphas-1 (Nov 27 06:33 UTC): each
+        # restart stops the command
+        Path("/etc/needrestart/conf.d/agentjobs.conf").write_text("$nrconf{override_rc}{qr(^agentjob)} = 0;\n")
     user = os.environ.get("SUDO_USER") or "root"
     Path("/etc/systemd/system/agentjobs-watch-%s.service" % user).write_text(
         "[Unit]\nDescription=Agent jobs memory watcher (%s)\n\n"
