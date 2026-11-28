@@ -346,12 +346,17 @@ def door(me, jobs):
     """(open, reason). The door for a new job on Linux. It looks only at measured values. A paused job keeps it shut
     (the room is for its resume), except for a --first job, which still needs free memory. A queued --first job keeps
     it shut for the other jobs: the memory that frees up is for it (alphas-1, Nov 24: the steps of the daily signal
-    build waited 663 min in the queue and ran 348 min)."""
+    build waited 663 min in the queue and ran 348 min). It does so only while its need fits in the memory that is free
+    when the running jobs end: a bigger need would keep the door shut with no end (alphas-1, Nov 28 00:02-01:00 UTC: a
+    --first job needed 9.4 GB where at most 8.8 GB could be free, and 7 jobs waited up to 55 min with 11 GB available)."""
     paused = [m for m in jobs if is_paused(m)]
     if paused and not me.get("first"):
         return False, "%d job%s paused here because memory is short" % (len(paused), " is" if len(paused) == 1 else "s are")
-    if not me.get("first") and [m for m in jobs if m.get("first") and m.get("state") == "queued" and m["id"] != me.get("id")]:
-        return False, "a --first job waits for memory here"
+    waiting_first = [m for m in jobs if m.get("first") and m.get("state") == "queued" and m["id"] != me.get("id")]
+    if waiting_first and not me.get("first"):
+        can_free = free_now(jobs, me.get("id")) + sum(job_mem(m) for m in jobs if m.get("state") == "run")
+        if [m for m in waiting_first if need_gb(m) * GB <= can_free]:
+            return False, "a --first job waits for memory here"
     low = max(2 * GB, LOW_FRAC * total_ram())
     if mem_pressure() > PSI_FULL_MAX and available() <= PSI_ROOM * low:  # same rule as the watcher
         return False, "memory pressure is high"

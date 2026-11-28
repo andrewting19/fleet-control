@@ -71,6 +71,10 @@ class Measured(unittest.TestCase):
         waiting = [{"id": "d", "state": "queued", "first": True}]
         self.assertFalse(self.run_with(self.patches(), lambda: job.door({"id": "x"}, waiting))[0])
         self.assertTrue(self.run_with(self.patches(), lambda: job.door({"id": "d", "first": True}, waiting))[0])
+        # a --first job that needs more than the host can free when the running jobs end does not hold the door
+        jobs = [{"id": "d", "state": "queued", "first": True, "peak_known": 9.4}, {"id": "a", "state": "run"}]
+        self.assertTrue(self.run_with(self.patches(free=8, mem={"a": 1}), lambda: job.door({"id": "x"}, jobs))[0])
+        self.assertFalse(self.run_with(self.patches(free=8, mem={"a": 1.5}), lambda: job.door({"id": "x"}, jobs))[0])
         for avail, is_open in ((4, False), (20, True)):  # pressure closes the door only when the host is also low on memory
             with mock.patch.object(job, "available", return_value=avail * GB), mock.patch.object(job, "total_ram", return_value=64 * GB):
                 self.assertEqual(self.run_with(self.patches(psi=9), lambda: job.door({}, []))[0], is_open)
